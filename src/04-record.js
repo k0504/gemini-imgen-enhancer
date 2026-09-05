@@ -537,13 +537,41 @@
     return Array.prototype.indexOf.call(hostsNow(), host);
   }
 
+  // The ordinal the last scan pass could count, and the conversation it counted
+  // it in. Both, because an ordinal is only a message while the thread it was
+  // counted in is the thread being asked about.
+  var lastSeenMessage = null;
+
+  // Called by the scan pass. A pass that can see nothing notes nothing rather
+  // than clearing what the pass before it saw: the tear-down is itself a
+  // mutation, so the pass it raises is the one that would otherwise overwrite
+  // the only answer left.
+  function noteLastMessage() {
+    var count = hostsNow().length;
+    if (!count) return;
+    lastSeenMessage = { path: appPath(), index: count - 1 };
+  }
+
   // Which message a native regenerate speaks for. That request carries no turn
   // identifier at all - see §native-retry - so the server takes the
   // conversation's last turn, and the record at this ordinal is the only one
-  // such a send can be written from. -1 when the conversation is not on screen,
-  // which its caller reads as "no record".
+  // such a send can be written from.
+  //
+  // The live count answers nothing at the one moment this is asked: pressing
+  // Gemini's own regenerate takes the conversation's query containers out of
+  // the tree before the request leaves, and the read happens inside
+  // XMLHttpRequest.send. Every regenerate in a captured session resolved to -1
+  // because of it, so no record was ever applied to one and the page's own list
+  // went out - the list from before the message was last resent. The pass
+  // before the tear-down is what answers instead.
+  //
+  // -1 survives, and means the ordinal is unknown rather than absent. What is
+  // done with it is §native-retry's.
   function lastMessageIndex() {
-    return hostsNow().length - 1;
+    var live = hostsNow().length - 1;
+    if (live >= 0) return live;
+    if (lastSeenMessage && lastSeenMessage.path === appPath()) return lastSeenMessage.index;
+    return -1;
   }
 
   // The rule the record exists for, stated once: from the moment this script

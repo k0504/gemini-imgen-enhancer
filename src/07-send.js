@@ -74,7 +74,18 @@
     }
 
     var index = lastMessageIndex();
-    var base = index < 0 ? null : recordAttachments(index);
+    // Unknown, which is not the same as having no record, and was read as one
+    // for as long as the ordinal came from a live count: see lastMessageIndex.
+    // Nothing here can tell whether the list the page built is this message's
+    // current one, and the case where it is not is the one this function
+    // exists for, so there is no list to send.
+    if (index < 0) {
+      return refuseSend('this regenerate carries ' + body.length + ' attachments and the '
+        + 'conversation could not be read to say which message it repeats, so whether '
+        + 'those are the images that message now holds cannot be established; reopen '
+        + 'the message and resend it instead');
+    }
+    var base = recordAttachments(index);
     // Not a downgrade. A message this script has never resent is described by
     // the page correctly, and that is most of them.
     if (!base) {

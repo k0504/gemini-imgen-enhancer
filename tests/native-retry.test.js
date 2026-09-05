@@ -45,6 +45,11 @@ function load(names, scope) {
 // arrays on purpose: the defect this covers is the two disagreeing.
 const state = {
   record: null,
+  // Which ordinal holds a record, and which ordinal the script resolves the
+  // regenerate to. They are separate because the defect below is the second
+  // one answering nothing while the first still holds the images that were
+  // sent: a stub that ties them together cannot express that state.
+  recordAt: 0,
   lastIndex: 0,
   stale: [],
   refusals: []
@@ -66,7 +71,7 @@ const api = load(['nativeRetryContribution'], {
     return state.stale.indexOf(att[1]) === -1 ? 'token' : 'contrib-stale';
   },
   recordAttachments: function (index) {
-    return index === state.lastIndex && state.record ? state.record.slice() : null;
+    return index === state.recordAt && state.record ? state.record.slice() : null;
   },
   lastMessageIndex: function () { return state.lastIndex; }
 });
@@ -90,6 +95,7 @@ function send(action, names) {
 
 function reset(record, opts) {
   state.record = record;
+  state.recordAt = 0;
   state.lastIndex = (opts && opts.lastIndex !== undefined) ? opts.lastIndex : 0;
   state.stale = (opts && opts.stale) || [];
   state.refusals = [];
@@ -159,6 +165,23 @@ it('leaves the page list alone when the message has no record', function () {
     'no record is not a defect, it is a message this script never resent, so nothing is refused');
 });
 
+// The state every regenerate in a captured session was actually in. Pressing
+// Gemini's own regenerate takes the conversation's query containers out of the
+// DOM before the request goes out, so the ordinal resolved inside
+// XMLHttpRequest.send answered -1 - and -1 fell through the branch above as
+// though the message had no record. It is the opposite: which message this
+// repeats is unknown, so whether the page's list is the right one is unknown
+// too, and that list is the one from before the last resend.
+it('refuses the send when which message the regenerate repeats is unknown', function () {
+  reset([token('from-record.png')], { lastIndex: -1 });
+  const inner = send(5, ['from-page.png']);
+  assert.strictEqual(api.nativeRetryContribution(inner), null);
+  assert.deepStrictEqual(inner[0][3].map((a) => a[1]), ['from-page.png'],
+    'the body is left as it was; the refusal is what stops it, not a rewrite');
+  assert.strictEqual(state.refusals.length, 1,
+    'an unresolvable ordinal is refused, not answered with the page\'s own list');
+});
+
 // Both of the cases below used to let the request through with the list the
 // page had built. That list is the one the message held before its last
 // resend, so the regenerate answered images the user had already replaced.
@@ -188,6 +211,50 @@ it('leaves a regenerate that carries no attachments alone', function () {
   reset([token('from-record.png')]);
   const inner = send(5, []);
   assert.strictEqual(api.nativeRetryContribution(inner), null);
+});
+
+console.log('\nlastMessageIndex');
+
+// The two functions share one variable, so they are lifted together with it
+// declared the way the script declares it. The DOM below is what the live read
+// answers: `hosts` is how many query containers are in the tree, and a
+// regenerate takes them all out before its request leaves.
+const dom = { hosts: 0, path: '/app/one' };
+const ordinal = new Function('hostsNow', 'appPath',
+  'var lastSeenMessage = null;\n'
+  + extract('noteLastMessage') + '\n'
+  + extract('lastMessageIndex') + '\n'
+  + '; return { noteLastMessage: noteLastMessage, lastMessageIndex: lastMessageIndex };')(
+  function () { return { length: dom.hosts }; },
+  function () { return dom.path; }
+);
+
+it('reads the live count while the conversation is on screen', function () {
+  dom.hosts = 3;
+  dom.path = '/app/one';
+  ordinal.noteLastMessage();
+  assert.strictEqual(ordinal.lastMessageIndex(), 2);
+});
+
+it('answers the last pass\'s ordinal once the conversation is torn down', function () {
+  dom.hosts = 3;
+  dom.path = '/app/one';
+  ordinal.noteLastMessage();
+  dom.hosts = 0;
+  // The teardown raises a pass of its own, which must not overwrite what the
+  // pass before it saw.
+  ordinal.noteLastMessage();
+  assert.strictEqual(ordinal.lastMessageIndex(), 2);
+});
+
+it('answers nothing for a conversation no pass has seen', function () {
+  dom.hosts = 3;
+  dom.path = '/app/one';
+  ordinal.noteLastMessage();
+  dom.hosts = 0;
+  dom.path = '/app/two';
+  assert.strictEqual(ordinal.lastMessageIndex(), -1,
+    'an ordinal counted in another thread names a message of that thread');
 });
 
 console.log(failures ? '\n' + failures + ' failing' : '\nall passing');

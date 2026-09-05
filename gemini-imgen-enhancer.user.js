@@ -1420,13 +1420,41 @@
     return Array.prototype.indexOf.call(hostsNow(), host);
   }
 
+  // The ordinal the last scan pass could count, and the conversation it counted
+  // it in. Both, because an ordinal is only a message while the thread it was
+  // counted in is the thread being asked about.
+  var lastSeenMessage = null;
+
+  // Called by the scan pass. A pass that can see nothing notes nothing rather
+  // than clearing what the pass before it saw: the tear-down is itself a
+  // mutation, so the pass it raises is the one that would otherwise overwrite
+  // the only answer left.
+  function noteLastMessage() {
+    var count = hostsNow().length;
+    if (!count) return;
+    lastSeenMessage = { path: appPath(), index: count - 1 };
+  }
+
   // Which message a native regenerate speaks for. That request carries no turn
   // identifier at all - see §native-retry - so the server takes the
   // conversation's last turn, and the record at this ordinal is the only one
-  // such a send can be written from. -1 when the conversation is not on screen,
-  // which its caller reads as "no record".
+  // such a send can be written from.
+  //
+  // The live count answers nothing at the one moment this is asked: pressing
+  // Gemini's own regenerate takes the conversation's query containers out of
+  // the tree before the request leaves, and the read happens inside
+  // XMLHttpRequest.send. Every regenerate in a captured session resolved to -1
+  // because of it, so no record was ever applied to one and the page's own list
+  // went out - the list from before the message was last resent. The pass
+  // before the tear-down is what answers instead.
+  //
+  // -1 survives, and means the ordinal is unknown rather than absent. What is
+  // done with it is §native-retry's.
   function lastMessageIndex() {
-    return hostsNow().length - 1;
+    var live = hostsNow().length - 1;
+    if (live >= 0) return live;
+    if (lastSeenMessage && lastSeenMessage.path === appPath()) return lastSeenMessage.index;
+    return -1;
   }
 
   // The rule the record exists for, stated once: from the moment this script
@@ -2989,7 +3017,18 @@
     }
 
     var index = lastMessageIndex();
-    var base = index < 0 ? null : recordAttachments(index);
+    // Unknown, which is not the same as having no record, and was read as one
+    // for as long as the ordinal came from a live count: see lastMessageIndex.
+    // Nothing here can tell whether the list the page built is this message's
+    // current one, and the case where it is not is the one this function
+    // exists for, so there is no list to send.
+    if (index < 0) {
+      return refuseSend('this regenerate carries ' + body.length + ' attachments and the '
+        + 'conversation could not be read to say which message it repeats, so whether '
+        + 'those are the images that message now holds cannot be established; reopen '
+        + 'the message and resend it instead');
+    }
+    var base = recordAttachments(index);
     // Not a downgrade. A message this script has never resent is described by
     // the page correctly, and that is most of them.
     if (!base) {
@@ -4922,6 +4961,10 @@
 
   function scan() {
     watchRoute();
+    // Before any of the gates below, and outside all of them. What reads this
+    // is Gemini's own regenerate, which is not this script's feature and is
+    // pressed at a moment when the conversation can no longer be counted.
+    noteLastMessage();
     // Ahead of the editor's own gate: the usage line is not part of that
     // feature and is drawn whether or not it is switched on.
     ensureUsageLine();

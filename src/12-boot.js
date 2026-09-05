@@ -38,6 +38,10 @@
 
   function scan() {
     watchRoute();
+    // Before any of the gates below, and outside all of them. What reads this
+    // is Gemini's own regenerate, which is not this script's feature and is
+    // pressed at a moment when the conversation can no longer be counted.
+    noteLastMessage();
     // Ahead of the editor's own gate: the usage line is not part of that
     // feature and is drawn whether or not it is switched on.
     ensureUsageLine();
