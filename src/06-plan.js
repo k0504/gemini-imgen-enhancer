@@ -172,19 +172,23 @@
   // plan had already applied, so no value change would be dispatched and
   // Gemini's Update button would stay disabled with no way to unlock it.
   //
-  // Readiness alone, with no part for dirtiness. Gemini unlocks Update on a
-  // change to the prompt text and on nothing else, so waiting for the
-  // attachments to change left an edit that changed only the images locked
-  // until its uploads landed - and one that changed nothing locked for good,
-  // though §resend has had a route for it the whole time: written from the
-  // record where there is one, sent as it stands where there is not.
-  // Readiness stays because an existing entry reaches the server as an upload
-  // this document made or not at all, so a plan that is not ready has nothing
-  // to write the list from and its press would be refused.
+  // Dirtiness is required, and the reason is destructive rather than cosmetic.
+  // An edit resend truncates every turn after the message it resends, so a
+  // resend that changes nothing still costs the user every later turn - the
+  // images among them. Unlocking Update on readiness alone made that press
+  // reachable on any message the editor could open, and it was taken: a resend
+  // of message #0 that changed nothing took the whole conversation after it.
+  //
+  // Readiness is kept alongside it because an existing entry reaches the server
+  // as an upload this document made or not at all, so a plan that is not ready
+  // has nothing to write the list from and its press would be refused.
+  //
+  // The image-only edit this once locked out is a real gap and is not answered
+  // by removing this condition; it needs a route that does not truncate.
   function syncSentinel(p) {
     var textarea = textareaOf(p);
     if (!textarea) return;
-    var wanted = planIsReady(p);
+    var wanted = planIsDirty(p) && planIsReady(p);
     if (wanted === p.sentinelApplied) return;
     dbg('syncSentinel:', wanted ? 'appending zero-width space to textarea' : 'removing zero-width space from textarea');
     writeTextarea(textarea, wanted
