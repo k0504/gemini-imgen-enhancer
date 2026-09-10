@@ -170,8 +170,12 @@
   // conversations give theirs up. See §store.
   var BLOB_BUDGET = 50 * 1024 * 1024;
 
-  var LOG_PRO = '[nbpro]';
-  var LOG_IMG = '[gpie]';
+  // The version rides on every line, so any excerpt of the console or of the
+  // kept trace says which build wrote it. Reading it off the page was one
+  // more thing to ask for, every time.
+  var LOG_PRO = '[nbpro ' + VERSION + ']';
+  var LOG_IMG = '[gpie ' + VERSION + ']';
+  var LOG_DBG = '[gpie ' + VERSION + ':dbg]';
 
   // §trace ===================================================================
   // Two levels, and the difference between them is the point of this section.
@@ -258,10 +262,10 @@
       return typeof a === 'string' ? a : JSON.stringify(a);
     }).join(' ');
     var at = stamp();
-    say('log', '[gpie:dbg]', at, line);
+    say('log', LOG_DBG, at, line);
     try {
       var kept = JSON.parse(sessionStorage.getItem(DBG_STORE) || '[]');
-      kept.push(at + ' ' + line);
+      kept.push(at + ' v' + VERSION + ' ' + line);
       while (kept.length > 300) kept.shift();
       sessionStorage.setItem(DBG_STORE, JSON.stringify(kept));
     } catch (e) {
@@ -269,7 +273,7 @@
     }
     try {
       localStorage.setItem(DBG_KEEP,
-        dbgKeep(localStorage.getItem(DBG_KEEP), stamp + ' ' + line, DBG_KEEP_CHARS));
+        dbgKeep(localStorage.getItem(DBG_KEEP), at + ' v' + VERSION + ' ' + line, DBG_KEEP_CHARS));
     } catch (e) {
       // As above. This buffer is a convenience for reading a failure back
       // afterwards, and losing it costs nothing that is happening now.
@@ -285,7 +289,7 @@
       if (!kept.length) return;
       sessionStorage.removeItem(DBG_STORE);
       say('log', '[gpie:dbg] ---- replaying ' + kept.length + ' lines logged before the reload ----');
-      kept.forEach(function (line) { say('log', '[gpie:dbg]', line); });
+      kept.forEach(function (line) { say('log', LOG_DBG, line); });
       say('log', '[gpie:dbg] ---- end of replay ----');
     } catch (e) {
       // Nothing to replay.
