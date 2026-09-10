@@ -244,16 +244,24 @@
     return next.slice(cut + 1);
   }
 
+  // Wall-clock time in UTC+8, HH:MM:SS.mmm. Every timestamp this script
+  // writes goes through here: the trace was stamped in UTC until 3.66.0,
+  // which read as eight hours behind the git log and the user's clock.
+  function stamp() {
+    var t = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    return t.toISOString().slice(11, 23);
+  }
+
   function dbg() {
     if (!debugTrace) return;
     var line = Array.prototype.map.call(arguments, function (a) {
       return typeof a === 'string' ? a : JSON.stringify(a);
     }).join(' ');
-    var stamp = new Date().toISOString().slice(11, 23);
-    say('log', '[gpie:dbg]', stamp, line);
+    var at = stamp();
+    say('log', '[gpie:dbg]', at, line);
     try {
       var kept = JSON.parse(sessionStorage.getItem(DBG_STORE) || '[]');
-      kept.push(stamp + ' ' + line);
+      kept.push(at + ' ' + line);
       while (kept.length > 300) kept.shift();
       sessionStorage.setItem(DBG_STORE, JSON.stringify(kept));
     } catch (e) {
@@ -483,7 +491,7 @@
     try {
       var kept = JSON.parse(sessionStorage.getItem(BODY_STORE) || '[]');
       kept.push({
-        at: new Date().toISOString().slice(11, 23),
+        at: stamp(),
         touched: !!touched,
         url: String(url),
         body: String(body)
