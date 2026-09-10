@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.64.0
+// @version      3.65.0
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*

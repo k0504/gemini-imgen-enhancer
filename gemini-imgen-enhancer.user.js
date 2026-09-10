@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.64.0
+// @version      3.65.0
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -149,7 +149,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.64.0';
+  var VERSION = '3.65.0';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -2564,23 +2564,19 @@
   // plan had already applied, so no value change would be dispatched and
   // Gemini's Update button would stay disabled with no way to unlock it.
   //
-  // Dirtiness is required, and the reason is destructive rather than cosmetic.
-  // An edit resend truncates every turn after the message it resends, so a
-  // resend that changes nothing still costs the user every later turn - the
-  // images among them. Unlocking Update on readiness alone made that press
-  // reachable on any message the editor could open, and it was taken: a resend
-  // of message #0 that changed nothing took the whole conversation after it.
-  //
-  // Readiness is kept alongside it because an existing entry reaches the server
-  // as an upload this document made or not at all, so a plan that is not ready
-  // has nothing to write the list from and its press would be refused.
-  //
-  // The image-only edit this once locked out is a real gap and is not answered
-  // by removing this condition; it needs a route that does not truncate.
+  // Readiness alone, with no part for dirtiness. Gemini unlocks Update on a
+  // change to the prompt text and on nothing else, so waiting for the
+  // attachments to change left an edit that changed only the images locked
+  // until its uploads landed - and one that changed nothing locked for good,
+  // though §resend has had a route for it the whole time: written from the
+  // record where there is one, sent as it stands where there is not.
+  // Readiness stays because an existing entry reaches the server as an upload
+  // this document made or not at all, so a plan that is not ready has nothing
+  // to write the list from and its press would be refused.
   function syncSentinel(p) {
     var textarea = textareaOf(p);
     if (!textarea) return;
-    var wanted = planIsDirty(p) && planIsReady(p);
+    var wanted = planIsReady(p);
     if (wanted === p.sentinelApplied) return;
     dbg('syncSentinel:', wanted ? 'appending zero-width space to textarea' : 'removing zero-width space from textarea');
     writeTextarea(textarea, wanted
@@ -2901,24 +2897,30 @@
   //   null    all contrib, 2 elems     cleared (native)      28.0s
   //   null    all contrib, 2 elems     id kept, resume null  24.2s
   //
-  // The last row is the one this sends, and it is the fastest of them: the cost
-  // the earlier rows were paying to the tuple was the resume blob alone, not
-  // the address. Clearing the whole tuple hid that, because it took both.
+  // The third row is the one this sends. The two under it are faster and both
+  // lose the turn, each in its own way.
   //
-  // Clearing the whole tuple is the one that cannot be afforded. The server
-  // then answers from a conversation of its own, and while §net keeps that off
-  // the screen and §store keeps the record, the turn is written to the other
-  // conversation and this one never receives it: a reload reads this
-  // conversation from the server and gets the message as it was before the
-  // edit. The generated image is not lost, it is filed under the conversation
-  // that produced it, which is not the one being looked at.
+  // Clearing the whole tuple makes the server answer from a conversation of
+  // its own: §net keeps that off the screen and §store keeps the record, but
+  // the turn is written to the other conversation and this one never receives
+  // it, so a reload gets the message as it was before the edit.
   //
-  // So the id stays and only the resume blob at inner[2][9] goes. That blob is
-  // what is added to the tuple when a message is edited in place, and it is the
-  // element that makes the server treat the send as a revision of an existing
-  // turn rather than a new one; a native send inside an existing conversation
-  // carries the other elements and not this one. Dropping it alone answers in
-  // 2.0s to first byte, against 21.3s for the same send with it left in.
+  // Dropping the resume blob at inner[2][9] alone keeps the address and loses
+  // the revision. That blob is what is added to the tuple when a message is
+  // edited in place, and it is the element that makes the server treat the
+  // send as a revision of the edited turn rather than a new one; without it the
+  // server appends a new turn under the same parent the edited message hangs
+  // from. On a message with a parent that new turn is the one a reload shows,
+  // which is why this shape measured well and looked right. On message #0
+  // there is no parent: the reload shows the original turn, and the generated
+  // image is gone from the conversation and from the library with it. It was
+  // shipped that way for a fortnight and taken against a one-message
+  // conversation until every image it produced had vanished.
+  //
+  // So the tuple goes out as Gemini built it. The action and the attachment
+  // form are the two differences that can be taken, and 58.0s is the price of
+  // a turn that stays.
+  //
   // Answers whether the send may go out. hasNew is gone with the route that
   // read it: it decided how much of the fast shape was still worth applying to
   // a list that could not have all of it, and there is no such list any more.
@@ -2948,20 +2950,20 @@
 
     inner[ACTION_INDEX] = null;
     var convTuple = inner[CONVERSATION_INDEX];
-    var hadResume = Array.isArray(convTuple) && convTuple[RESUME_INDEX] != null
+    var hasResume = Array.isArray(convTuple) && convTuple[RESUME_INDEX] != null
       && convTuple[RESUME_INDEX] !== '';
-    if (hadResume) convTuple[RESUME_INDEX] = null;
-    dbg('chooseSendShape: brand-new upload shape in this conversation,',
-      hadResume ? 'resume blob dropped' : 'no resume blob to drop', '| conversation',
+    dbg('chooseSendShape: brand-new upload shape, conversation tuple kept whole,',
+      hasResume ? 'resume blob present' : 'no resume blob', '| conversation',
       (Array.isArray(convTuple) && convTuple[0]) || '(none)');
     // True is only "this send may go out": the shape itself reaches its readers
     // two other ways, through work.shape, which report() prints, and through
-    // inner, which is rewritten in place. A future shape that clears the
-    // conversation tuple must also set pendingStrip the way applyStripProbe
-    // does, or §net never arms the response patch and the page navigates to
-    // /app on the first chunk - a failure that shows as a navigation rather
-    // than an exception, so a test that only diffs the request body passes
-    // straight through it.
+    // inner, which is rewritten in place. A future shape that touches the
+    // conversation tuple has two failures to get past, neither of which a test
+    // that only diffs the request body sees: clearing it must also set
+    // pendingStrip the way applyStripProbe does, or §net never arms the
+    // response patch and the page navigates to /app on the first chunk; and
+    // dropping the resume blob files the turn as a new one, which only shows
+    // on a reload of a message with no parent.
     return true;
   }
 

@@ -11,14 +11,17 @@
 //   null    all contrib, 2 elems     cleared               47.1s
 //   null    all contrib, 2 elems     id kept, resume null  24.2s
 //
-// The last row is what the script sends. Every earlier row is a defect that has
-// already shipped once: the correct shape was written, deleted three commits
-// later on a misdiagnosis, and made again four versions on. Nothing failed when
-// it was deleted, which is why it stayed deleted.
+// The third row is what the script sends. The two rows under it are faster and
+// both lose the turn: clearing the tuple files it under a conversation the
+// server opens for itself, and dropping the resume blob alone files it as a new
+// turn instead of a revision of the edited one. A new turn hangs off the same
+// parent as the message that was edited, so on a message with a parent the
+// reload shows it and the shape looked right; on message #0 there is no parent,
+// the reload shows the original turn, and the generated image is gone from the
+// conversation and from the library with it.
 //
-// The conversation id assertion is the one that is not about speed. Clearing
-// the whole tuple takes eleven seconds off and writes the turn into a
-// conversation the server opens for itself, where the user never sees it.
+// The tuple assertions are the ones that are not about speed. The action and
+// the attachment form are the two differences that can be taken.
 //
 // Run: node tests/send-shape.test.js
 
@@ -101,10 +104,12 @@ it('the action is cleared, so the send is not an edit resend', function () {
   assert.strictEqual(inner[72], null, '2 is the 88.3s row');
 });
 
-it('the resume blob goes, and it is the only thing in the tuple that does', function () {
+it('the conversation tuple goes out whole, resume blob included', function () {
   const inner = editResend([contrib('a.jpg')]);
   api.chooseSendShape(inner, inner[0][3], { index: 0 });
-  assert.strictEqual(inner[2][9], null, 'the resume blob is what costs 21.3s to first byte');
+  assert.strictEqual(inner[2][9], 'RESUME-BLOB-PRESENT',
+    'the resume blob is what makes the send a revision of the edited turn; without it the '
+    + 'server appends a new turn, and on message #0 a reload shows the original instead');
   assert.strictEqual(inner[2][0], CONV,
     'the conversation id stays: clearing the tuple files the turn under a conversation '
     + 'the server opens for itself, which the user never sees');

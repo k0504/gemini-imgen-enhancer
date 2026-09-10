@@ -106,16 +106,13 @@ function it(what, fn) {
 
 console.log('edit unlock');
 
-it('an edit that changed nothing is left locked', function () {
+it('an edit that changed nothing is still unlocked', function () {
   const p = plan([entry(), entry({ index: 1 })]);
   assert.strictEqual(api.planIsDirty(p), false, 'the fixture is the untouched case');
   api.syncSentinel(p);
-  // A resend truncates every turn after the message it resends. One that
-  // changes nothing buys nothing and costs all of them, so it is not offered.
-  assert.strictEqual(state.writes, 0,
-    'an unchanged resend would truncate the turns after it for no gain: '
-    + JSON.stringify(state.textarea.value));
-  assert.strictEqual(p.sentinelApplied, false);
+  assert.ok(state.textarea.value.endsWith(SENTINEL),
+    'Update has no other way off disabled: ' + JSON.stringify(state.textarea.value));
+  assert.strictEqual(p.sentinelApplied, true);
 });
 
 it('an edit that changed the images is unlocked', function () {
@@ -140,7 +137,7 @@ it('a plan whose record is in doubt is left locked', function () {
 });
 
 it('the sentinel is written once, not on every pass', function () {
-  const p = plan([entry()], { originalCount: 0 });
+  const p = plan([entry()]);
   api.syncSentinel(p);
   api.syncSentinel(p);
   api.syncSentinel(p);
@@ -149,7 +146,7 @@ it('the sentinel is written once, not on every pass', function () {
 });
 
 it('an upload failing after the unlock takes the sentinel back off', function () {
-  const p = plan([entry(), entry({ index: 1 })], { originalCount: 1 });
+  const p = plan([entry(), entry({ index: 1 })]);
   api.syncSentinel(p);
   p.entries[1].freshAttachment = null;
   api.syncSentinel(p);
@@ -161,7 +158,7 @@ it('a sentinel left by an earlier run does not count as this plan\'s', function 
   // Reading the current text instead of the flag would see this one, skip the
   // write, and leave Update disabled with nothing left that could unlock it.
   state.textarea.value = 'draw a cat' + SENTINEL;
-  const p = plan([entry()], { originalCount: 0 });
+  const p = plan([entry()]);
   api.syncSentinel(p);
   assert.strictEqual(state.writes, 1, 'a value change is dispatched regardless');
 });
@@ -172,7 +169,7 @@ it('the uploads landing after the toolbar was built still unlock Update', functi
   // then. Nothing rebuilds the toolbar afterwards - ensureBar returns early on
   // a connected one - so unless the gate carries the sentinel too, the button
   // is grey for the rest of the edit.
-  const p = plan([entry({ freshAttachment: null })], { host: host(), originalCount: 0 });
+  const p = plan([entry({ freshAttachment: null })], { host: host() });
   api.syncSentinel(p);
   assert.strictEqual(state.writes, 0, 'not ready yet, as at toolbar build time');
 
