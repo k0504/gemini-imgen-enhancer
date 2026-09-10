@@ -98,8 +98,9 @@
   function planIsDirty(p) {
     if (!p) return false;
     // A retry changes nothing, but reporting dirty is what routes its send
-    // through the plan pipeline - the fast shape, the record, the refresh -
-    // and what makes the scan pass apply the sentinel that unlocks Update.
+    // through the plan pipeline - the fast shape, the record, the refresh.
+    // Unlocking Update is no longer among the things this decides; that reads
+    // readiness alone, in syncSentinel.
     if (p.retry) return true;
     if (p.entries.length !== p.originalCount) return true;
     for (var i = 0; i < p.entries.length; i++) {
@@ -170,10 +171,20 @@
   // sentinel left behind by an earlier run would otherwise look like one this
   // plan had already applied, so no value change would be dispatched and
   // Gemini's Update button would stay disabled with no way to unlock it.
+  //
+  // Readiness alone, with no part for dirtiness. Gemini unlocks Update on a
+  // change to the prompt text and on nothing else, so waiting for the
+  // attachments to change left an edit that changed only the images locked
+  // until its uploads landed - and one that changed nothing locked for good,
+  // though §resend has had a route for it the whole time: written from the
+  // record where there is one, sent as it stands where there is not.
+  // Readiness stays because an existing entry reaches the server as an upload
+  // this document made or not at all, so a plan that is not ready has nothing
+  // to write the list from and its press would be refused.
   function syncSentinel(p) {
     var textarea = textareaOf(p);
     if (!textarea) return;
-    var wanted = planIsDirty(p) && planIsReady(p);
+    var wanted = planIsReady(p);
     if (wanted === p.sentinelApplied) return;
     dbg('syncSentinel:', wanted ? 'appending zero-width space to textarea' : 'removing zero-width space from textarea');
     writeTextarea(textarea, wanted
@@ -371,6 +382,13 @@
         entry.freshPending = false;
         entry.freshError = String(err);
         say('warn', LOG_IMG, 'freshen failed for existing#' + entry.index + ':', err);
+      }).then(function () {
+        // §gate reads what this just settled, and the pass that would otherwise
+        // carry it runs on DOM mutations - which an upload landing is not. The
+        // press is answered from the plan either way, so what is stale without
+        // this is only the look of the button, and it stays stale until
+        // something unrelated happens to move the tree.
+        syncUpdateGate(p);
       });
     });
   }

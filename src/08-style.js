@@ -7,6 +7,11 @@
     '.gpie-bar{margin:6px 0 2px;margin-inline-start:auto;width:fit-content;',
     'max-width:100%;font:13px/1.45 system-ui,sans-serif}',
     '.gpie-strip{display:flex;flex-wrap:wrap;gap:8px;align-items:center}',
+    // §gate holds Gemini's Update button by intercepting the press, not by
+    // writing the disabled property Angular owns, so the look of a button that
+    // cannot be pressed has to be carried separately. Nothing here is read
+    // back; removing the class restores the button's own appearance.
+    '.gpie-held{opacity:.45;cursor:not-allowed}',
     '.gpie-tile{position:relative;width:84px;height:84px;flex:0 0 auto;cursor:grab;',
     'touch-action:none;user-select:none;-webkit-user-select:none}',
     '.gpie-tile.gpie-dragging{cursor:grabbing;z-index:5;opacity:.9;',

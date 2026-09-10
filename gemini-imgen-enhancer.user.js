@@ -6,7 +6,7 @@
 // @license      MIT
 // @homepageURL  https://github.com/k0504/gemini-imgen-enhancer
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
-// @version      3.59.0
+// @version      3.62.0
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -147,7 +147,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.59.0';
+  var VERSION = '3.62.0';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -2488,8 +2488,9 @@
   function planIsDirty(p) {
     if (!p) return false;
     // A retry changes nothing, but reporting dirty is what routes its send
-    // through the plan pipeline - the fast shape, the record, the refresh -
-    // and what makes the scan pass apply the sentinel that unlocks Update.
+    // through the plan pipeline - the fast shape, the record, the refresh.
+    // Unlocking Update is no longer among the things this decides; that reads
+    // readiness alone, in syncSentinel.
     if (p.retry) return true;
     if (p.entries.length !== p.originalCount) return true;
     for (var i = 0; i < p.entries.length; i++) {
@@ -2560,10 +2561,20 @@
   // sentinel left behind by an earlier run would otherwise look like one this
   // plan had already applied, so no value change would be dispatched and
   // Gemini's Update button would stay disabled with no way to unlock it.
+  //
+  // Readiness alone, with no part for dirtiness. Gemini unlocks Update on a
+  // change to the prompt text and on nothing else, so waiting for the
+  // attachments to change left an edit that changed only the images locked
+  // until its uploads landed - and one that changed nothing locked for good,
+  // though §resend has had a route for it the whole time: written from the
+  // record where there is one, sent as it stands where there is not.
+  // Readiness stays because an existing entry reaches the server as an upload
+  // this document made or not at all, so a plan that is not ready has nothing
+  // to write the list from and its press would be refused.
   function syncSentinel(p) {
     var textarea = textareaOf(p);
     if (!textarea) return;
-    var wanted = planIsDirty(p) && planIsReady(p);
+    var wanted = planIsReady(p);
     if (wanted === p.sentinelApplied) return;
     dbg('syncSentinel:', wanted ? 'appending zero-width space to textarea' : 'removing zero-width space from textarea');
     writeTextarea(textarea, wanted
@@ -2761,6 +2772,13 @@
         entry.freshPending = false;
         entry.freshError = String(err);
         say('warn', LOG_IMG, 'freshen failed for existing#' + entry.index + ':', err);
+      }).then(function () {
+        // §gate reads what this just settled, and the pass that would otherwise
+        // carry it runs on DOM mutations - which an upload landing is not. The
+        // press is answered from the plan either way, so what is stale without
+        // this is only the look of the button, and it stays stale until
+        // something unrelated happens to move the tree.
+        syncUpdateGate(p);
       });
     });
   }
@@ -3796,6 +3814,11 @@
     '.gpie-bar{margin:6px 0 2px;margin-inline-start:auto;width:fit-content;',
     'max-width:100%;font:13px/1.45 system-ui,sans-serif}',
     '.gpie-strip{display:flex;flex-wrap:wrap;gap:8px;align-items:center}',
+    // §gate holds Gemini's Update button by intercepting the press, not by
+    // writing the disabled property Angular owns, so the look of a button that
+    // cannot be pressed has to be carried separately. Nothing here is read
+    // back; removing the class restores the button's own appearance.
+    '.gpie-held{opacity:.45;cursor:not-allowed}',
     '.gpie-tile{position:relative;width:84px;height:84px;flex:0 0 auto;cursor:grab;',
     'touch-action:none;user-select:none;-webkit-user-select:none}',
     '.gpie-tile.gpie-dragging{cursor:grabbing;z-index:5;opacity:.9;',
@@ -4310,6 +4333,85 @@
     if (toolbar && toolbar.parentNode) toolbar.parentNode.removeChild(toolbar);
     toolbar = null;
     toolbarPlan = null;
+  }
+
+  // §gate ====================================================================
+  // Update is Gemini's own button and it unlocks on any change to the text,
+  // which is what editing a prompt is. The re-uploads an edit starts take
+  // seconds - a refetch and an upload per attachment, since a record upgraded
+  // to server references holds neither a live contrib nor the bytes - and a
+  // press inside that window reaches rewrite() with a plan that has nothing to
+  // write the list from. The send is refused, the transport throws to say the
+  // request never happened, and the page reports that as a lost connection.
+  // The refusal is correct and its reason is on the console, but the page's own
+  // error is what the user reads, so the press is stopped before it is made.
+  //
+  // syncSentinel is not this gate and never was: appending the zero-width space
+  // unlocks Update for an edit that changed no text, and nothing about it can
+  // hold the button closed once the user has typed.
+  //
+  // The button's `disabled` is Angular's. Writing it is undone by the next
+  // change detection, and putting it back afterwards cannot tell the value this
+  // held from the one the editor means, so nothing Angular owns is written: the
+  // press is intercepted in the capture phase, and the class carries only the
+  // look of a button that cannot be pressed.
+  function updateHold(p) {
+    return !!p && !planIsReady(p);
+  }
+
+  function heldPress(ev) {
+    if (!ev.target || !ev.target.closest) return;
+    if (!ev.target.closest('gem-button.update-button')) return;
+    var p = activePlan();
+    if (!updateHold(p)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+
+    // The three ways to be held want different things from the user, so they
+    // are not collapsed into one line about waiting: two of them never end on
+    // their own.
+    var failed = p.entries.filter(function (entry) { return entry.freshError; });
+    var pending = p.entries.filter(function (entry) {
+      return entry.kind === 'existing' ? !entry.freshAttachment : !entry.attachment;
+    });
+    if (p.blocked) {
+      progress('Update is held: ' + p.blocked);
+    } else if (failed.length) {
+      progress('Update is held: ' + failed.length + ' of ' + p.entries.length
+        + ' attachments failed to upload - remove and re-add them');
+    } else {
+      progress('Update is held: ' + pending.length + ' of ' + p.entries.length
+        + ' attachments are still uploading');
+    }
+    dbg('heldPress: Update pressed while the plan was not ready,', pending.length,
+      'of', p.entries.length, 'outstanding');
+  }
+
+  // Both phases, and on the host rather than the button: Angular rebuilds the
+  // button, and a listener bound to the node that existed when edit mode opened
+  // stops being on the one that gets pressed. pointerdown is taken too because
+  // the ripple starts there, and a press that is going nowhere should not look
+  // like one that is.
+  //
+  // Both halves of the button's availability are kept current here, the
+  // sentinel that unlocks it included. renderBar applies that once, when the
+  // toolbar is built, and ensureBar returns early on every pass after that:
+  // an edit that changed nothing had its only chance while the re-uploads its
+  // own opening started were still running, so the button stayed grey for the
+  // rest of the edit with nothing left to unlock it. This call is the one the
+  // scan pass and a landing upload already make, so the sentinel now follows
+  // readiness wherever it settles.
+  function syncUpdateGate(p) {
+    var host = p && p.host;
+    if (!host || !host.isConnected) return;
+    if (!host.__gpieGated) {
+      host.addEventListener('pointerdown', heldPress, true);
+      host.addEventListener('click', heldPress, true);
+      host.__gpieGated = true;
+    }
+    syncSentinel(p);
+    var btn = host.querySelector('gem-button.update-button button');
+    if (btn) btn.classList.toggle('gpie-held', updateHold(p));
   }
 
   // §retry ===================================================================
@@ -5003,6 +5105,9 @@
     plan.armedAt = null;
     syncOverrides();
     ensureBar(plan);
+    // Every pass, because Angular rebuilds the button and the class goes with
+    // it, and because what the gate reads changes as each upload lands.
+    syncUpdateGate(plan);
   }
 
   // Gemini writes the model it actually used into this node. Logging it turns

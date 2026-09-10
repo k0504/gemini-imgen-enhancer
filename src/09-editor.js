@@ -385,3 +385,82 @@
     toolbarPlan = null;
   }
 
+  // §gate ====================================================================
+  // Update is Gemini's own button and it unlocks on any change to the text,
+  // which is what editing a prompt is. The re-uploads an edit starts take
+  // seconds - a refetch and an upload per attachment, since a record upgraded
+  // to server references holds neither a live contrib nor the bytes - and a
+  // press inside that window reaches rewrite() with a plan that has nothing to
+  // write the list from. The send is refused, the transport throws to say the
+  // request never happened, and the page reports that as a lost connection.
+  // The refusal is correct and its reason is on the console, but the page's own
+  // error is what the user reads, so the press is stopped before it is made.
+  //
+  // syncSentinel is not this gate and never was: appending the zero-width space
+  // unlocks Update for an edit that changed no text, and nothing about it can
+  // hold the button closed once the user has typed.
+  //
+  // The button's `disabled` is Angular's. Writing it is undone by the next
+  // change detection, and putting it back afterwards cannot tell the value this
+  // held from the one the editor means, so nothing Angular owns is written: the
+  // press is intercepted in the capture phase, and the class carries only the
+  // look of a button that cannot be pressed.
+  function updateHold(p) {
+    return !!p && !planIsReady(p);
+  }
+
+  function heldPress(ev) {
+    if (!ev.target || !ev.target.closest) return;
+    if (!ev.target.closest('gem-button.update-button')) return;
+    var p = activePlan();
+    if (!updateHold(p)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+
+    // The three ways to be held want different things from the user, so they
+    // are not collapsed into one line about waiting: two of them never end on
+    // their own.
+    var failed = p.entries.filter(function (entry) { return entry.freshError; });
+    var pending = p.entries.filter(function (entry) {
+      return entry.kind === 'existing' ? !entry.freshAttachment : !entry.attachment;
+    });
+    if (p.blocked) {
+      progress('Update is held: ' + p.blocked);
+    } else if (failed.length) {
+      progress('Update is held: ' + failed.length + ' of ' + p.entries.length
+        + ' attachments failed to upload - remove and re-add them');
+    } else {
+      progress('Update is held: ' + pending.length + ' of ' + p.entries.length
+        + ' attachments are still uploading');
+    }
+    dbg('heldPress: Update pressed while the plan was not ready,', pending.length,
+      'of', p.entries.length, 'outstanding');
+  }
+
+  // Both phases, and on the host rather than the button: Angular rebuilds the
+  // button, and a listener bound to the node that existed when edit mode opened
+  // stops being on the one that gets pressed. pointerdown is taken too because
+  // the ripple starts there, and a press that is going nowhere should not look
+  // like one that is.
+  //
+  // Both halves of the button's availability are kept current here, the
+  // sentinel that unlocks it included. renderBar applies that once, when the
+  // toolbar is built, and ensureBar returns early on every pass after that:
+  // an edit that changed nothing had its only chance while the re-uploads its
+  // own opening started were still running, so the button stayed grey for the
+  // rest of the edit with nothing left to unlock it. This call is the one the
+  // scan pass and a landing upload already make, so the sentinel now follows
+  // readiness wherever it settles.
+  function syncUpdateGate(p) {
+    var host = p && p.host;
+    if (!host || !host.isConnected) return;
+    if (!host.__gpieGated) {
+      host.addEventListener('pointerdown', heldPress, true);
+      host.addEventListener('click', heldPress, true);
+      host.__gpieGated = true;
+    }
+    syncSentinel(p);
+    var btn = host.querySelector('gem-button.update-button button');
+    if (btn) btn.classList.toggle('gpie-held', updateHold(p));
+  }
+

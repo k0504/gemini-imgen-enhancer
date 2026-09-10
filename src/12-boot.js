@@ -80,6 +80,9 @@
     plan.armedAt = null;
     syncOverrides();
     ensureBar(plan);
+    // Every pass, because Angular rebuilds the button and the class goes with
+    // it, and because what the gate reads changes as each upload lands.
+    syncUpdateGate(plan);
   }
 
   // Gemini writes the model it actually used into this node. Logging it turns
