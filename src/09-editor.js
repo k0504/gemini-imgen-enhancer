@@ -168,8 +168,8 @@
     };
     p.entries.push(entry);
     renderBar(p);
-    // The existing images start becoming contribs now, so that by the time
-    // Update is pressed the send can take the shape §shape aims for.
+    // Settles the existing images now: most go out as they stand, and any
+    // re-upload a dead reference needs starts here rather than at the press.
     freshenExisting(p);
 
     uploadFile(file).then(function (attachment) {

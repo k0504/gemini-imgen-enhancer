@@ -8,20 +8,20 @@
   //   inner[0][3]  attachments, in the order the prompt calls image 1 / 2 / 3
   //   inner[0][9]  image model selector
   //   inner[2]     conversation tuple: [0] c_<id>, [1] r_<id> of the previous
-  //                turn, [2] rc_<id>, [9] a resume blob present only on an edit
-  //                resend
+  //                turn, [2] rc_<id>, [9] a resume blob the page adds on some
+  //                edit resends and not others
   //   inner[72]    action: null first send, 2 edit resend,
-  //                5 plain regenerate, 7 Pro regenerate
+  //                5 plain regenerate, 7 Pro regenerate. The 2 is what files
+  //                an edit as a revision of its turn; it is never changed.
   //
-  // Attachments come in two shapes and may be mixed inside one array:
+  // Attachments come in two shapes and may be mixed inside one array, which is
+  // what the page itself sends once an image on a message has been replaced:
   //   form A (already on the message)  [[null,1,1,mime], name, "<long token>"]
   //   form B (uploaded this document)  [[contribPath,1,null,mime], name]
   //
-  // Form B once carried a uuid as a fifth meta element and a nine-element tail
-  // ending in [0]. The tail belongs to an edit resend and was never ours to
-  // send; the uuid stopped existing when ProcessFile was retired. See §upload.
-  // The two forms must not be mixed: see §shape for what the server charges for
-  // each difference.
+  // Form B once carried a uuid as a fifth meta element; it stopped existing
+  // when ProcessFile was retired, see §upload. A tuple the page built is sent
+  // as found, tail and all - an edit resend is the page's own send. See §shape.
   //
   // Both features rewrite the same request, so the body is parsed and
   // serialised once and each feature edits the shared inner array in place.
@@ -30,8 +30,9 @@
   var ATTACHMENTS = 3;
   var MODEL_MARKER = 9;
   var CONVERSATION_INDEX = 2;
-  // Inside the conversation tuple. Present only on an edit resend, and the one
-  // element of that tuple that marks the send as one: see §shape.
+  // Inside the conversation tuple. The page puts a resume blob here on some
+  // edit resends and not on others; the action code, not this, is what marks
+  // the send as one. Read for the trace only: see §shape.
   var RESUME_INDEX = 9;
   var ACTION_INDEX = 72;
   var ACTION_EDIT_RESEND = 2;
@@ -78,7 +79,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.65.0';
+  var VERSION = '3.66.0';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be

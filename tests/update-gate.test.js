@@ -43,9 +43,10 @@ const body = names.map(extract).join('\n') + '\n; return { ' + names.join(', ') 
 const api = new Function('activePlan', 'planIsReady', 'progress', 'dbg', body)(
   () => state.plan,
   // The real one, in the shape 06-plan.js states it: blocked is never ready,
-  // and every entry has to hold the attachment it will be sent as.
+  // and every entry has to hold what it will be sent as - an existing one the
+  // reference it keeps or its fresh upload, a new one its upload.
   (p) => (p.blocked ? false : p.entries.every((e) => (e.kind === 'existing'
-    ? e.freshAttachment : e.attachment))),
+    ? !!(e.sendAsIs || e.freshAttachment) : !!e.attachment))),
   (text) => state.said.push(text),
   function () { });
 

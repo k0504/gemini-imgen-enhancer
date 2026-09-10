@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.65.0
+// @version      3.66.0
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -79,20 +79,20 @@
   //   inner[0][3]  attachments, in the order the prompt calls image 1 / 2 / 3
   //   inner[0][9]  image model selector
   //   inner[2]     conversation tuple: [0] c_<id>, [1] r_<id> of the previous
-  //                turn, [2] rc_<id>, [9] a resume blob present only on an edit
-  //                resend
+  //                turn, [2] rc_<id>, [9] a resume blob the page adds on some
+  //                edit resends and not others
   //   inner[72]    action: null first send, 2 edit resend,
-  //                5 plain regenerate, 7 Pro regenerate
+  //                5 plain regenerate, 7 Pro regenerate. The 2 is what files
+  //                an edit as a revision of its turn; it is never changed.
   //
-  // Attachments come in two shapes and may be mixed inside one array:
+  // Attachments come in two shapes and may be mixed inside one array, which is
+  // what the page itself sends once an image on a message has been replaced:
   //   form A (already on the message)  [[null,1,1,mime], name, "<long token>"]
   //   form B (uploaded this document)  [[contribPath,1,null,mime], name]
   //
-  // Form B once carried a uuid as a fifth meta element and a nine-element tail
-  // ending in [0]. The tail belongs to an edit resend and was never ours to
-  // send; the uuid stopped existing when ProcessFile was retired. See §upload.
-  // The two forms must not be mixed: see §shape for what the server charges for
-  // each difference.
+  // Form B once carried a uuid as a fifth meta element; it stopped existing
+  // when ProcessFile was retired, see §upload. A tuple the page built is sent
+  // as found, tail and all - an edit resend is the page's own send. See §shape.
   //
   // Both features rewrite the same request, so the body is parsed and
   // serialised once and each feature edits the shared inner array in place.
@@ -101,8 +101,9 @@
   var ATTACHMENTS = 3;
   var MODEL_MARKER = 9;
   var CONVERSATION_INDEX = 2;
-  // Inside the conversation tuple. Present only on an edit resend, and the one
-  // element of that tuple that marks the send as one: see §shape.
+  // Inside the conversation tuple. The page puts a resume blob here on some
+  // edit resends and not on others; the action code, not this, is what marks
+  // the send as one. Read for the trace only: see §shape.
   var RESUME_INDEX = 9;
   var ACTION_INDEX = 72;
   var ACTION_EDIT_RESEND = 2;
@@ -149,7 +150,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.65.0';
+  var VERSION = '3.66.0';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -2330,6 +2331,15 @@
     return 'other';
   }
 
+  // Whether the server still honours a reference, which is what decides
+  // whether an existing image goes out as it stands or is re-uploaded first.
+  // §freshen asks it when a plan is made and §shape asks it again of the list
+  // actually written, so the two cannot disagree.
+  function attReusable(t) {
+    var cls = attClass(t);
+    return cls === 'token' || cls === 'contrib-live';
+  }
+
   function uploadFile(file) {
     var mime = file.type || 'image/jpeg';
     var startHeaders = {
@@ -2384,8 +2394,8 @@
       doneStep2('contrib', contrib.slice(0, 50) + '...', '-> form B tuple ready');
       noteUploadEnd();
       contribsThisDocument[contrib] = Date.now();
-      // Two elements, the shape a capture of the page's own send shows. §apply
-      // writes exactly these two, so nothing downstream reads past them.
+      // Two elements, the shape a capture of the page's own send shows for a
+      // new upload. §apply writes the tuple as it stands.
       return [[contrib, 1, null, mime], file.name];
     });
   }
@@ -2444,53 +2454,31 @@
       base: base,
       baseBlobs: baseBlobs,
       blocked: blocked,
-      // Declared by §retry before it opened edit mode, not set on the plan
-      // afterwards. A retry changes no image and writes the record's own
-      // references - measured at 6.3s against 78.2s for the converted shape -
-      // so the re-uploads below are not what it sends, and a plan that learns
-      // it is a retry only after they have started spends the user's press
-      // waiting for bytes nothing will read. That wait is what made the button
-      // feel like it opens an editor rather than resending.
+      // Declared by §retry before it opened edit mode. A retry changes no
+      // image; what the flag does for the plan is make planIsDirty report it
+      // dirty, which routes its send through the same pipeline as an edit.
       retry: false,
-      retryFresh: false,
       originalCount: thumbs.length,
       originalThumbs: thumbs.slice(),
       entries: entries,
       armedAt: null,
       sentinelApplied: false
     };
-    // Unconditionally, and as early as edit mode opens, because §shape can only
-    // take the fast route when every attachment written is a contrib this
-    // document minted - see the timing table there. Which entries actually cost
-    // an upload is freshenExisting's to decide: one that already holds a live
-    // contrib of ours is reused where it stands.
-    //
-    // This was once gated on the base holding a contrib that had gone stale,
-    // which read the case backwards. §refresh upgrades a record's contribs to
-    // the server's own durable references, and a server reference is not a
-    // contrib tuple at all, so the gate saw nothing stale, nothing was
-    // re-uploaded, and applyPlanTo wrote the reference straight back - the
-    // nine-element shape the timing table measures at 79.9s against 24.2s. The
-    // regression therefore arrived on its own, one record upgrade after the
-    // shape work landed, which is what made it read as the fix coming undone.
     p.retry = claimRetryIntent(host);
-    // The exception, and the only one: a record whose references this document
-    // cannot send has nothing to write the retry from either, so those are
-    // re-uploaded and the retry waits for them. §retry owns that judgement.
-    p.retryFresh = p.retry && retryNeedsFresh(p);
-    if (p.retry && !p.retryFresh) {
-      dbg('makePlan: message #' + index + ' is a retry of what the record already holds, '
-        + 'no attachment is re-uploaded');
-    } else {
-      freshenExisting(p);
-    }
+    // As early as edit mode opens. Which entries cost an upload is settled
+    // there, once: one whose reference the server still honours - its token,
+    // or a contrib this document minted - goes out as it stands, retry or
+    // edit, and only a dead contrib is re-uploaded. So the ordinary plan is
+    // ready the moment it is made, and the wait, where there is one, is spent
+    // before the press rather than inside the answer.
+    freshenExisting(p);
     return p;
   }
 
   function planIsDirty(p) {
     if (!p) return false;
     // A retry changes nothing, but reporting dirty is what routes its send
-    // through the plan pipeline - the fast shape, the record, the refresh.
+    // through the plan pipeline - the record, the refresh.
     // Unlocking Update is no longer among the things this decides; that reads
     // readiness alone, in syncSentinel.
     if (p.retry) return true;
@@ -2501,26 +2489,23 @@
     return false;
   }
 
-  // Every entry, existing ones included. An existing entry reaches the server as
-  // an upload this document made or not at all: there is no second source to
-  // write it from, and the list the page built in its place carries the server's
-  // own references, which is the shape measured at 79.9s against 24.2s.
+  // Every entry has to have something to be written from: an existing one the
+  // reference it already holds, when the server still honours it, or the fresh
+  // contrib of its re-upload when it does not; a new one the contrib its upload
+  // minted. settleExisting decides which of the two an existing entry is, once,
+  // when the plan is made.
   //
   // This gates the Update button rather than the send, so the wait is spent
-  // before the press instead of inside the answer. The re-uploads start when
-  // edit mode opens, so by the time anything has been changed they are usually
-  // already done.
+  // before the press instead of inside the answer. Most plans have nothing to
+  // wait for; the re-uploads that do occur start when edit mode opens.
   function planIsReady(p) {
     // A record that cannot be trusted is not made ready by finishing the
     // uploads: what the list would be written from is the thing in doubt.
     if (p.blocked) return false;
-    // A retry sends the record's references as they stand and no upload of
-    // this plan's, so there is nothing here for it to be waiting on. This
-    // gates the sentinel that unlocks Update, which is why waiting here was
-    // the whole of the delay between the press and the resend.
-    if (p.retry && !p.retryFresh) return true;
     return p.entries.every(function (entry) {
-      return entry.kind === 'existing' ? entry.freshAttachment : entry.attachment;
+      return entry.kind === 'existing'
+        ? !!(entry.sendAsIs || entry.freshAttachment)
+        : !!entry.attachment;
     });
   }
 
@@ -2570,9 +2555,9 @@
   // until its uploads landed - and one that changed nothing locked for good,
   // though §resend has had a route for it the whole time: written from the
   // record where there is one, sent as it stands where there is not.
-  // Readiness stays because an existing entry reaches the server as an upload
-  // this document made or not at all, so a plan that is not ready has nothing
-  // to write the list from and its press would be refused.
+  // Readiness stays because an entry whose reference is dead has nothing to be
+  // written from until its re-upload lands, so a plan that is not ready has no
+  // list to write and its press would be refused.
   function syncSentinel(p) {
     var textarea = textareaOf(p);
     if (!textarea) return;
@@ -2600,16 +2585,18 @@
   }
 
   // §freshen =================================================================
-  // Every image the resend will carry has to be a contrib uploaded by this
-  // document, because that is the only attachment form a brand-new upload send
-  // contains. The sources are tried in order of how much can go wrong with
-  // them: the bytes in the record cannot expire or be blocked, a contrib minted
-  // in this document is already the right shape, and refetching a thumbnail is
-  // the last resort because lh3 answers with a scaled copy and the page's CSP
-  // blocks blob: URLs outright.
+  // An existing image goes out with the reference it already holds whenever
+  // the server still honours it: the token the page or §refresh gave the
+  // record, or a contrib this document minted inside its ttl. That is what the
+  // page itself sends on an edit, and what §retry measured at 6.3s against
+  // 78.2s for re-uploading everything. Only a contrib the server no longer
+  // honours is re-uploaded, from sources tried in order of how much can go
+  // wrong with them: the bytes in the record cannot expire or be blocked, and
+  // refetching a thumbnail is the last resort because lh3 answers with a scaled
+  // copy and the page's CSP blocks blob: URLs outright.
   //
-  // This starts in the background the moment a plan first gains a new image, so
-  // that the send itself stays synchronous.
+  // This starts the moment the plan is made, so that the send itself stays
+  // synchronous.
   function thumbFullSize(url) {
     // A size suffix asks for a scaled copy and s0 asks for the stored original.
     // Most of these URLs carry no suffix at all and redirect to an s512 copy,
@@ -2736,30 +2723,41 @@
       });
   }
 
+  // Which existing entries go out as they stand and which have to be
+  // re-uploaded first, decided once and synchronously. With no record the
+  // page's own list is the reference, and it is read at the send, where it
+  // exists; with one, the record's tuple is reused when the server still
+  // honours it. Returns the entries that need an upload.
+  function settleExisting(p) {
+    var uploads = [];
+    p.entries.forEach(function (entry) {
+      if (entry.kind !== 'existing' || entry.sendAsIs || entry.freshAttachment
+        || entry.freshPending) return;
+      if (!p.base || attReusable(p.base[entry.index])) {
+        entry.sendAsIs = true;
+        return;
+      }
+      uploads.push(entry);
+    });
+    return uploads;
+  }
+
   function freshenExisting(p) {
     // Nothing is uploaded for a plan that cannot be sent. The re-uploads exist
-    // to make the press fast, and this plan has no press to be fast for.
+    // to make the press possible, and this plan has no press to make possible.
     if (p.blocked) {
       dbg('freshen: message #' + p.index + ' is blocked, nothing is uploaded -', p.blocked);
       return;
     }
-    p.entries.forEach(function (entry) {
-      if (entry.kind !== 'existing' || entry.freshAttachment || entry.freshPending) return;
+    var uploads = settleExisting(p);
+    dbg('freshen: message #' + p.index + ',', p.entries.filter(function (entry) {
+      return entry.kind === 'existing' && entry.sendAsIs;
+    }).length, 'existing sent as they stand,', uploads.length, 'to re-upload',
+    p.base ? '(from the record)' : '(no record: the page\'s own list is the reference)');
+    uploads.forEach(function (entry) {
       entry.freshPending = true;
 
-      var known = p.base && p.base[entry.index];
-
       serverName(p, entry).then(function (name) {
-        // Ahead of the bytes, not behind them. A live contrib of ours is
-        // already the shape the send wants, so uploading over it buys nothing
-        // and costs a round trip per image on every edit - which is now every
-        // edit, since this runs unconditionally.
-        if (attClass(known) === 'contrib-live') {
-          entry.freshAttachment = known;
-          dbg('freshen: existing#' + entry.index, 'contrib from this document, reused as-is');
-          return null;
-        }
-
         var bytes = entry.bytes || (p.baseBlobs && p.baseBlobs[entry.index]) || null;
         if (bytes) return uploadInto(entry, bytes, name, 'uploading from the record,');
 
@@ -2830,32 +2828,24 @@
       return e.kind === 'existing' ? 'existing#' + e.index : 'new:' + e.name;
     }).join(', '));
 
-    // A retry changes no image, so the list it writes is the one the message
-    // already holds - the same list nativeRetryContribution writes for the
-    // page's own control, and for the same reason: the server holds these
-    // references already, and re-uploading them to send a converted shape was
-    // measured at 78.2s against 6.3s. Nothing was uploaded for this plan, so
-    // the entries carry no fresh attachment and the checks below, which read
-    // them, do not describe this path.
-    if (p.retry && !p.retryFresh) {
-      if (!Array.isArray(base) || base.length !== p.originalCount) {
-        refuseSend('the retry of message #' + p.index + ' has ' + (Array.isArray(base)
-          ? base.length + ' attachments' : 'no attachment list')
-          + ' to send against the ' + p.originalCount + ' the message shows');
-        return false;
-      }
-      tuple[ATTACHMENTS] = base.slice();
-      dbg('applyPlanTo: retry, wrote the list the message already holds |', attShape(base));
-      return true;
-    }
-
+    // What each entry goes out as, verbatim. An existing entry sent as it
+    // stands is the base's own tuple - the record's, or the page's for a
+    // message never resent - tail and all: this is the page's own edit resend,
+    // so the page's own form is right. One that was re-uploaded is the contrib
+    // its upload minted, and a new entry likewise. Nothing is reshaped.
+    var refs = p.entries.map(function (entry) {
+      if (entry.kind !== 'existing') return entry.attachment || null;
+      if (!entry.sendAsIs) return entry.freshAttachment || null;
+      var held = Array.isArray(base) ? base[entry.index] : null;
+      // Settled at plan time, and asked again here: a contrib's ttl can run
+      // out between the two, and the page's list is only read now.
+      return attReusable(held) ? held : null;
+    });
     // What the list will be written from has to exist first. The count below
     // compares the base against the plan's original length, which says nothing
     // about an entry added since, and a new entry whose upload failed carries
     // no attachment at all.
-    var missing = p.entries.filter(function (entry) {
-      return entry.kind === 'existing' ? !entry.freshAttachment : !entry.attachment;
-    }).length;
+    var missing = refs.filter(function (ref) { return !ref; }).length;
     var count = Array.isArray(base) ? base.length : 0;
     // Both of these used to leave the list untouched and let the send go. What
     // it went with was the page's list - the images from before this message
@@ -2870,14 +2860,7 @@
         + ' attachments against the ' + p.originalCount + ' the editor opened with, '
         + 'so which list to write cannot be established');
     } else {
-      tuple[ATTACHMENTS] = p.entries.map(function (entry) {
-        // Two elements, the shape the page itself sends for a new upload. The
-        // nine-element form belongs to an action-2 resend, and anything this
-        // script uploads goes out with the action cleared, so the trailing edit
-        // marker must never ride along; a captured send once showed it doing so.
-        if (entry.kind !== 'existing') return [entry.attachment[0], entry.attachment[1]];
-        return [entry.freshAttachment[0], entry.freshAttachment[1]];
-      });
+      tuple[ATTACHMENTS] = refs;
       listWritten = true;
       dbg('applyPlanTo: wrote', attShape(tuple[ATTACHMENTS]));
     }
@@ -2886,84 +2869,71 @@
   }
 
   // §shape ===================================================================
-  // Which shape the resend goes out in. Measured on one five-image message with
-  // one prompt, removing a single difference at a time:
+  // There is one shape: the edit resend as the page built it. Measured on one
+  // five-image message with one prompt, removing a single difference at a
+  // time:
   //
   //   action  attachments              conversation tuple    time
-  //   2       mixed contrib, 9 elems   present whole         88.3s
+  //   2       page's own references    present whole         88.3s
   //   null    mixed contrib, 9 elems   present whole         79.9s
   //   null    all contrib, 2 elems     present whole         58.0s
   //   null    all contrib, 2 elems     cleared               47.1s
   //   null    all contrib, 2 elems     cleared (native)      28.0s
   //   null    all contrib, 2 elems     id kept, resume null  24.2s
   //
-  // The third row is the one this sends. The two under it are faster and both
-  // lose the turn, each in its own way.
+  // Every row under the first loses the turn on message #0, and each was
+  // shipped for a while because each was measured on a message with a parent.
   //
-  // Clearing the whole tuple makes the server answer from a conversation of
-  // its own: §net keeps that off the screen and §store keeps the record, but
-  // the turn is written to the other conversation and this one never receives
-  // it, so a reload gets the message as it was before the edit.
+  // The action code is what makes the server file the send as a revision of
+  // the edited turn. With it cleared the server appends a new turn instead,
+  // under the same parent the edited message hangs from. On a message with a
+  // parent that new turn is the one a reload shows, so the shape measured well
+  // and looked right. On message #0 there is no parent: the reload shows the
+  // original turn, and every image the resend generated is gone from the
+  // conversation and from the library with it. The trace of 2026-09-10 - ten
+  // sends against one conversation between 06:59 and 09:53, all of message #0
+  // - shows the page's own body carrying action 2 every time, and this script
+  // clearing it every time; the resume blob at inner[2][9] was there on some
+  // of those sends and absent on others, the page sent action 2 either way,
+  // and restoring the blob (3.65.0) changed nothing. Clearing the whole tuple
+  // loses the turn differently: the server answers from a conversation of its
+  // own, and this one never receives the turn.
   //
-  // Dropping the resume blob at inner[2][9] alone keeps the address and loses
-  // the revision. That blob is what is added to the tuple when a message is
-  // edited in place, and it is the element that makes the server treat the
-  // send as a revision of the edited turn rather than a new one; without it the
-  // server appends a new turn under the same parent the edited message hangs
-  // from. On a message with a parent that new turn is the one a reload shows,
-  // which is why this shape measured well and looked right. On message #0
-  // there is no parent: the reload shows the original turn, and the generated
-  // image is gone from the conversation and from the library with it. It was
-  // shipped that way for a fortnight and taken against a one-message
-  // conversation until every image it produced had vanished.
+  // So nothing here chooses. The action stays 2, the tuple is not touched, an
+  // existing image keeps the reference it holds (§freshen), and what is
+  // guarded is that every attachment written is one the server honours - a
+  // dead contrib fails the send outright, and a list that reaches here with
+  // one means §freshen or §gate stopped holding.
   //
-  // So the tuple goes out as Gemini built it. The action and the attachment
-  // form are the two differences that can be taken, and 58.0s is the price of
-  // a turn that stays.
-  //
-  // Answers whether the send may go out. hasNew is gone with the route that
-  // read it: it decided how much of the fast shape was still worth applying to
-  // a list that could not have all of it, and there is no such list any more.
-  function chooseSendShape(inner, written, p) {
-    var allContrib = Array.isArray(written) && written.length > 0
-      && written.every(function (att) { return attClass(att) === 'contrib-live'; });
+  // Answers whether the send may go out.
+  function guardSendShape(inner, written, p) {
+    var dead = Array.isArray(written)
+      ? written.filter(function (att) { return !attReusable(att); }) : [];
     work.images = Array.isArray(written) ? written.length : 0;
-    work.shape = allContrib ? 'brand-new upload shape' : 'edit resend';
+    work.shape = 'edit resend';
 
-    if (!allContrib) {
-      // Unreachable by construction, and refused rather than sent because of
-      // it. freshenExisting re-uploads every existing entry that is not already
-      // a live contrib of this document, planIsReady holds Update closed until
-      // each one has its fresh attachment, and applyPlanTo writes the list from
-      // those and nothing else - so a list arriving here with anything else in
-      // it means one of those three stopped holding.
-      //
-      // This used to send it as an edit resend instead: correct, and 79.9s
-      // against 24.2s. A slow path that exists is a slow path that gets taken,
-      // and one taken silently is indistinguishable from the fast one until the
-      // user is a minute into waiting. There is no reason to keep a route to a
-      // state that cannot legitimately occur.
-      refuseSend('the attachment list for message #' + p.index + ' is not all uploads this '
-        + 'document made, which the editor should have made impossible: ' + attShape(written));
+    if (!Array.isArray(written) || !written.length || dead.length) {
+      refuseSend('the attachment list for message #' + p.index + ' holds '
+        + (dead.length || 'no') + ' reference' + (dead.length === 1 ? '' : 's')
+        + (dead.length ? ' the server would not honour' : '') + ', which the editor should '
+        + 'have made impossible: ' + attShape(written));
+      return false;
+    }
+    if (inner[ACTION_INDEX] !== ACTION_EDIT_RESEND) {
+      // applyPlanTo returns before writing anything for any other action, so
+      // this is not reachable; it is stated so that no later route can clear
+      // the action quietly and take the turn with it.
+      refuseSend('the action for message #' + p.index + ' is '
+        + JSON.stringify(inner[ACTION_INDEX]) + ', not the edit resend the plan was written for');
       return false;
     }
 
-    inner[ACTION_INDEX] = null;
     var convTuple = inner[CONVERSATION_INDEX];
     var hasResume = Array.isArray(convTuple) && convTuple[RESUME_INDEX] != null
       && convTuple[RESUME_INDEX] !== '';
-    dbg('chooseSendShape: brand-new upload shape, conversation tuple kept whole,',
+    dbg('guardSendShape: edit resend as the page built it, action', inner[ACTION_INDEX] + ',',
       hasResume ? 'resume blob present' : 'no resume blob', '| conversation',
-      (Array.isArray(convTuple) && convTuple[0]) || '(none)');
-    // True is only "this send may go out": the shape itself reaches its readers
-    // two other ways, through work.shape, which report() prints, and through
-    // inner, which is rewritten in place. A future shape that touches the
-    // conversation tuple has two failures to get past, neither of which a test
-    // that only diffs the request body sees: clearing it must also set
-    // pendingStrip the way applyStripProbe does, or §net never arms the
-    // response patch and the page navigates to /app on the first chunk; and
-    // dropping the resume blob files the turn as a new one, which only shows
-    // on a reload of a message with no parent.
+      (Array.isArray(convTuple) && convTuple[0]) || '(none)', '|', attShape(written));
     return true;
   }
 
@@ -3109,39 +3079,10 @@
     // the not-ready gate's, which would report uploads that are not the reason.
     if (p.blocked) return backOut(inner, p, p.blocked);
 
-    // A retry changes no image, so nothing below it applies: the attachments go
-    // out as the references they already are - the record's if it has one,
-    // since the body Gemini builds for a message it has resent is the one from
-    // before that resend, otherwise the page's own. The upload-and-convert path
-    // exists to carry images the server has never seen; on a retry it uploads
-    // what the server already holds and asks it to treat the send as a first
-    // one. Measured against the native regenerate of the same message: 78.2s
-    // for the converted shape, 6.3s for the native, which keeps its references.
+    // A retry takes the route below like any edit. Its list is the record's
+    // own references, or the page's for a message never resent, and that is
+    // what every edit now sends for the images it leaves alone: see §freshen.
     //
-    // A retry whose references this document cannot use is the exception: it
-    // has re-uploaded them by now, so it falls through to the path below and
-    // takes the converted shape, which is the right one for a list of contribs.
-    if (p.retry && !p.retryFresh) {
-      // The same gate the route below has. A plan left behind by an editor that
-      // was closed with Escape rather than Cancel survives with its host, and
-      // the retry reuses it: an entry whose upload failed has no attachment to
-      // write, and applyPlanTo dereferenced it.
-      if (!planIsReady(p)) {
-        return backOut(inner, p, 'an upload on the plan for this message never finished');
-      }
-      var kept = applyPlanTo(inner, p);
-      // The same reading of that return as the route below: null means this
-      // send is not the one the plan was made for, so it is left alone, and
-      // false means applyPlanTo has refused it.
-      if (kept === null) return null;
-      if (!kept) return null;
-      dbg('editorContribution: retry, attachments left as they stand',
-        kept ? '(written from the record)' : '(as the page built them)');
-      var reload = commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], kept);
-      plan = null;
-      teardownEditorUi();
-      return reload;
-    }
     // An unchanged list still has to be written when the message carries a
     // record, because the body Gemini builds is the one from before the resend
     // that produced it. With no record and no change there is no list worth
@@ -3164,10 +3105,9 @@
       teardownEditorUi();
       return null;
     }
-    // One gate, dirty or not. An existing entry reaches the server as an upload
-    // this document made or not at all, so a plan that is not ready has nothing
-    // to write the list from - and the list the page built in its place carries
-    // the server's own references, the shape measured at 79.9s against 24.2s.
+    // One gate, dirty or not, retry or edit. An entry whose reference the
+    // server no longer honours reaches it as a re-upload or not at all, so a
+    // plan that is not ready has nothing to write the list from.
     // Update stays locked until this holds, so arriving here means the press beat
     // the lock; the entries are named because the two ways to get here want
     // opposite things from the user - an upload still running means the next
@@ -3192,7 +3132,7 @@
 
     dbg(dirty ? 'attachments rewritten' : 'attachments restored',
       p.originalCount, '->', p.entries.length);
-    if (!chooseSendShape(inner, inner[PROMPT_TUPLE][ATTACHMENTS], p)) return null;
+    if (!guardSendShape(inner, inner[PROMPT_TUPLE][ATTACHMENTS], p)) return null;
 
     var reload = commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], listWritten);
 
@@ -4126,8 +4066,8 @@
     };
     p.entries.push(entry);
     renderBar(p);
-    // The existing images start becoming contribs now, so that by the time
-    // Update is pressed the send can take the shape §shape aims for.
+    // Settles the existing images now: most go out as they stand, and any
+    // re-upload a dead reference needs starts here rather than at the press.
     freshenExisting(p);
 
     uploadFile(file).then(function (attachment) {
@@ -4444,9 +4384,9 @@
     + 'The turns after it are replaced, as with an edit.';
 
   // Which message the next plan is being built for a retry of. Declared to
-  // makePlan rather than set on the plan afterwards, and that ordering is the
-  // whole point: a plan decides at creation whether to re-upload every existing
-  // attachment, and a retry sends none of them.
+  // makePlan rather than set on the plan afterwards: the flag is what makes
+  // planIsDirty report the plan dirty, which routes a send that changes
+  // nothing through the record and the refresh like an edit.
   //
   // Set before edit mode is opened, because the scan pass that builds the plan
   // can run in the same frame as the click. Read once and cleared, so a plan
@@ -4547,19 +4487,6 @@
     info(parts.join(' | '));
   }
 
-  // Sending what the message holds is safe only while the server still honours
-  // those references. A message that has never been resent carries the tokens
-  // the page itself was given, which it does. A record written by a resend
-  // carries contrib paths until refreshOverride upgrades them to tokens, and
-  // that upgrade can fail; a contrib minted by an earlier document is expired
-  // besides. Those, and only those, are re-uploaded before the retry fires.
-  function retryNeedsFresh(p) {
-    if (!p.base) return false;
-    return p.base.some(function (att) {
-      return attClass(att) === 'contrib-stale';
-    });
-  }
-
   function startRetry(host) {
     if (retryPending) return;
     if (document.querySelector('div.user-query-container.edit-mode')) {
@@ -4588,8 +4515,8 @@
       // there is to wait for on that path. One that carries attachments does
       // arm one, and the plan is made by the scan pass, which the observer
       // queues after this poll can already see the textarea. Returning then
-      // handed the retry a null plan, so retryNeedsFresh never ran and the
-      // record's dead references went out as they stood.
+      // handed the retry a null plan, so nothing settled the record's
+      // references and its dead contribs went out as they stood.
       var p = plan && plan.host === host ? plan : null;
       if (!p && host.querySelector('user-query-file-preview')) return null;
       return { p: p, textarea: textarea };
@@ -4606,12 +4533,11 @@
         // returns early while the toolbar is connected and the sentinel that
         // unlocks Update is applied by renderBar's syncSentinel, nowhere else.
         renderBar(got.p);
-        // Whether anything had to be re-uploaded was decided in makePlan, off
-        // the same retryNeedsFresh this file owns. The ordinary retry has
-        // nothing in flight and presses now; the exception is the record whose
-        // references this document cannot send, which has no other way to go
-        // out at all.
-        if (!got.p.retryFresh) {
+        // Whether anything has to be re-uploaded was settled when the plan was
+        // made (§freshen). The ordinary retry has nothing in flight and presses
+        // now; the exception is a record holding contribs the server no longer
+        // honours, which have no other way to go out at all.
+        if (planIsReady(got.p)) {
           reportRetryLead(t0);
           pressUpdate(host);
           return;

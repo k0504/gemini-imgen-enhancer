@@ -140,39 +140,10 @@
     // the not-ready gate's, which would report uploads that are not the reason.
     if (p.blocked) return backOut(inner, p, p.blocked);
 
-    // A retry changes no image, so nothing below it applies: the attachments go
-    // out as the references they already are - the record's if it has one,
-    // since the body Gemini builds for a message it has resent is the one from
-    // before that resend, otherwise the page's own. The upload-and-convert path
-    // exists to carry images the server has never seen; on a retry it uploads
-    // what the server already holds and asks it to treat the send as a first
-    // one. Measured against the native regenerate of the same message: 78.2s
-    // for the converted shape, 6.3s for the native, which keeps its references.
+    // A retry takes the route below like any edit. Its list is the record's
+    // own references, or the page's for a message never resent, and that is
+    // what every edit now sends for the images it leaves alone: see §freshen.
     //
-    // A retry whose references this document cannot use is the exception: it
-    // has re-uploaded them by now, so it falls through to the path below and
-    // takes the converted shape, which is the right one for a list of contribs.
-    if (p.retry && !p.retryFresh) {
-      // The same gate the route below has. A plan left behind by an editor that
-      // was closed with Escape rather than Cancel survives with its host, and
-      // the retry reuses it: an entry whose upload failed has no attachment to
-      // write, and applyPlanTo dereferenced it.
-      if (!planIsReady(p)) {
-        return backOut(inner, p, 'an upload on the plan for this message never finished');
-      }
-      var kept = applyPlanTo(inner, p);
-      // The same reading of that return as the route below: null means this
-      // send is not the one the plan was made for, so it is left alone, and
-      // false means applyPlanTo has refused it.
-      if (kept === null) return null;
-      if (!kept) return null;
-      dbg('editorContribution: retry, attachments left as they stand',
-        kept ? '(written from the record)' : '(as the page built them)');
-      var reload = commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], kept);
-      plan = null;
-      teardownEditorUi();
-      return reload;
-    }
     // An unchanged list still has to be written when the message carries a
     // record, because the body Gemini builds is the one from before the resend
     // that produced it. With no record and no change there is no list worth
@@ -195,10 +166,9 @@
       teardownEditorUi();
       return null;
     }
-    // One gate, dirty or not. An existing entry reaches the server as an upload
-    // this document made or not at all, so a plan that is not ready has nothing
-    // to write the list from - and the list the page built in its place carries
-    // the server's own references, the shape measured at 79.9s against 24.2s.
+    // One gate, dirty or not, retry or edit. An entry whose reference the
+    // server no longer honours reaches it as a re-upload or not at all, so a
+    // plan that is not ready has nothing to write the list from.
     // Update stays locked until this holds, so arriving here means the press beat
     // the lock; the entries are named because the two ways to get here want
     // opposite things from the user - an upload still running means the next
@@ -223,7 +193,7 @@
 
     dbg(dirty ? 'attachments rewritten' : 'attachments restored',
       p.originalCount, '->', p.entries.length);
-    if (!chooseSendShape(inner, inner[PROMPT_TUPLE][ATTACHMENTS], p)) return null;
+    if (!guardSendShape(inner, inner[PROMPT_TUPLE][ATTACHMENTS], p)) return null;
 
     var reload = commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], listWritten);
 

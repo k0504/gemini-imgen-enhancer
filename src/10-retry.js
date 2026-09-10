@@ -20,9 +20,9 @@
     + 'The turns after it are replaced, as with an edit.';
 
   // Which message the next plan is being built for a retry of. Declared to
-  // makePlan rather than set on the plan afterwards, and that ordering is the
-  // whole point: a plan decides at creation whether to re-upload every existing
-  // attachment, and a retry sends none of them.
+  // makePlan rather than set on the plan afterwards: the flag is what makes
+  // planIsDirty report the plan dirty, which routes a send that changes
+  // nothing through the record and the refresh like an edit.
   //
   // Set before edit mode is opened, because the scan pass that builds the plan
   // can run in the same frame as the click. Read once and cleared, so a plan
@@ -123,19 +123,6 @@
     info(parts.join(' | '));
   }
 
-  // Sending what the message holds is safe only while the server still honours
-  // those references. A message that has never been resent carries the tokens
-  // the page itself was given, which it does. A record written by a resend
-  // carries contrib paths until refreshOverride upgrades them to tokens, and
-  // that upgrade can fail; a contrib minted by an earlier document is expired
-  // besides. Those, and only those, are re-uploaded before the retry fires.
-  function retryNeedsFresh(p) {
-    if (!p.base) return false;
-    return p.base.some(function (att) {
-      return attClass(att) === 'contrib-stale';
-    });
-  }
-
   function startRetry(host) {
     if (retryPending) return;
     if (document.querySelector('div.user-query-container.edit-mode')) {
@@ -164,8 +151,8 @@
       // there is to wait for on that path. One that carries attachments does
       // arm one, and the plan is made by the scan pass, which the observer
       // queues after this poll can already see the textarea. Returning then
-      // handed the retry a null plan, so retryNeedsFresh never ran and the
-      // record's dead references went out as they stood.
+      // handed the retry a null plan, so nothing settled the record's
+      // references and its dead contribs went out as they stood.
       var p = plan && plan.host === host ? plan : null;
       if (!p && host.querySelector('user-query-file-preview')) return null;
       return { p: p, textarea: textarea };
@@ -182,12 +169,11 @@
         // returns early while the toolbar is connected and the sentinel that
         // unlocks Update is applied by renderBar's syncSentinel, nowhere else.
         renderBar(got.p);
-        // Whether anything had to be re-uploaded was decided in makePlan, off
-        // the same retryNeedsFresh this file owns. The ordinary retry has
-        // nothing in flight and presses now; the exception is the record whose
-        // references this document cannot send, which has no other way to go
-        // out at all.
-        if (!got.p.retryFresh) {
+        // Whether anything has to be re-uploaded was settled when the plan was
+        // made (§freshen). The ordinary retry has nothing in flight and presses
+        // now; the exception is a record holding contribs the server no longer
+        // honours, which have no other way to go out at all.
+        if (planIsReady(got.p)) {
           reportRetryLead(t0);
           pressUpdate(host);
           return;

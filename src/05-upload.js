@@ -52,6 +52,15 @@
     return 'other';
   }
 
+  // Whether the server still honours a reference, which is what decides
+  // whether an existing image goes out as it stands or is re-uploaded first.
+  // §freshen asks it when a plan is made and §shape asks it again of the list
+  // actually written, so the two cannot disagree.
+  function attReusable(t) {
+    var cls = attClass(t);
+    return cls === 'token' || cls === 'contrib-live';
+  }
+
   function uploadFile(file) {
     var mime = file.type || 'image/jpeg';
     var startHeaders = {
@@ -106,8 +115,8 @@
       doneStep2('contrib', contrib.slice(0, 50) + '...', '-> form B tuple ready');
       noteUploadEnd();
       contribsThisDocument[contrib] = Date.now();
-      // Two elements, the shape a capture of the page's own send shows. §apply
-      // writes exactly these two, so nothing downstream reads past them.
+      // Two elements, the shape a capture of the page's own send shows for a
+      // new upload. §apply writes the tuple as it stands.
       return [[contrib, 1, null, mime], file.name];
     });
   }
