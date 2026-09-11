@@ -2,6 +2,10 @@
   var STORE_PRO = 'forceNbPro';
   var STORE_IMG = 'promptImageEditor';
   var STORE_USAGE = 'usageDisplay';
+  // §recent's buffer (localStorage). Declared here rather than in 15-recent.js
+  // because renderMenu() runs at boot, ahead of that part's own statements.
+  var RECENT_STORE = 'gpieRecent';
+  var RECENT_KEEP = 3;
 
   var hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
   var forcePro = hasGM ? GM_getValue(STORE_PRO, true) : true;
@@ -47,6 +51,13 @@
       GM_registerMenuCommand('Sweep Original Keys', function () {
         sweepOrigins();
       }),
+      // The last few generations, by the keys §recent kept as they landed.
+      // Walks the download chain only; nothing is asked of the rpc, which is
+      // what makes it answer for an image the conversation no longer shows.
+      GM_registerMenuCommand('Recover Recent Generations (' + readRecent().length + ')',
+        function () {
+          recoverRecent();
+        }),
       GM_registerMenuCommand('Debug Trace: ' + (debugTrace ? 'ON' : 'OFF'), function () {
         debugTrace = !debugTrace;
         if (hasGM) GM_setValue(STORE_DBG, debugTrace);

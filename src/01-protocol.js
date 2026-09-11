@@ -79,7 +79,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.66.0';
+  var VERSION = '3.67.0';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be

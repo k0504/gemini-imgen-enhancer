@@ -501,9 +501,13 @@
     if (where.indexOf('generation') !== -1) {
       // Read for its tokens, not marked as read: this is one turn and the
       // sweep still has the rest of the conversation to walk.
-      wrbPayloads(text, null).forEach(function (chunk) {
+      var chunks = wrbPayloads(text, null);
+      chunks.forEach(function (chunk) {
         rememberOrigins(chunk, where);
       });
+      // §recent: the original key, resolved now while the answer still names
+      // the turn, and kept where the listing's pruning cannot reach it.
+      rememberRecent(chunks);
       return;
     }
     if (where.indexOf('conversation load') === -1) {
