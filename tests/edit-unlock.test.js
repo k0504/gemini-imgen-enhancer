@@ -185,5 +185,98 @@ it('the gate leaves a torn-down editor alone', function () {
   assert.deepStrictEqual(gate.synced, [], 'there is no textarea left to write into');
 });
 
+// The write itself, with the caret the user is typing at. The sentinel follows
+// readiness, and readiness settles seconds into the edit - when the re-uploads
+// the edit's own opening started land - so this write happens while the user is
+// in the middle of a sentence. Assigning value collapses the selection to the
+// end of the text, which moved the caret out from under the typing.
+const FakeTextArea = function (value) {
+  this._value = value;
+  this.selectionStart = value.length;
+  this.selectionEnd = value.length;
+  this.ranges = 0;
+  this.events = [];
+};
+Object.defineProperty(FakeTextArea.prototype, 'value', {
+  configurable: true,
+  get: function () { return this._value; },
+  // What the browser does: a value that arrives by assignment collapses the
+  // selection to the end, whatever the caret was doing before it.
+  set: function (v) {
+    this._value = v;
+    this.selectionStart = v.length;
+    this.selectionEnd = v.length;
+  }
+});
+FakeTextArea.prototype.setSelectionRange = function (start, end) {
+  this.selectionStart = start;
+  this.selectionEnd = end;
+  this.ranges++;
+};
+FakeTextArea.prototype.dispatchEvent = function (ev) { this.events.push(ev); return true; };
+
+const page = { activeElement: null };
+const writeApi = new Function('HTMLTextAreaElement', 'Event', 'document',
+  extract('writeTextarea') + '\n' + extract('carryCaret')
+  + '\n; return { writeTextarea };')(
+  FakeTextArea,
+  function (type) { this.type = type; },
+  page);
+
+function typing(value, start, end) {
+  const textarea = new FakeTextArea(value);
+  textarea.selectionStart = start;
+  textarea.selectionEnd = end === undefined ? start : end;
+  page.activeElement = textarea;
+  return textarea;
+}
+
+it('appending the sentinel leaves the caret where the user is typing', function () {
+  const textarea = typing('draw a cat', 5);
+  writeApi.writeTextarea(textarea, 'draw a cat' + SENTINEL);
+  assert.strictEqual(textarea.selectionStart, 5,
+    'the uploads landing mid-sentence must not move the caret to the end');
+  assert.strictEqual(textarea.selectionEnd, 5);
+});
+
+it('a selection survives the write', function () {
+  const textarea = typing('draw a cat', 5, 10);
+  writeApi.writeTextarea(textarea, 'draw a cat' + SENTINEL);
+  assert.strictEqual(textarea.selectionStart, 5);
+  assert.strictEqual(textarea.selectionEnd, 10, 'the user was selecting a word to replace');
+});
+
+it('stripping the sentinel keeps the caret before it', function () {
+  const textarea = typing('draw a cat' + SENTINEL, 4);
+  writeApi.writeTextarea(textarea, 'draw a cat');
+  assert.strictEqual(textarea.selectionStart, 4);
+});
+
+it('a caret past the stripped sentinel moves back by what was removed', function () {
+  // The sentinel goes on at the end, but the user types on afterwards, so by
+  // the time an upload fails and takes it off again it sits mid-text.
+  const textarea = typing('ab' + SENTINEL + 'cd', 5);
+  writeApi.writeTextarea(textarea, 'abcd');
+  assert.strictEqual(textarea.selectionStart, 4,
+    'the caret was between c and d and stays there');
+});
+
+it('a textarea nobody is typing in is left alone', function () {
+  const textarea = typing('draw a cat', 5);
+  page.activeElement = null;
+  writeApi.writeTextarea(textarea, 'draw a cat' + SENTINEL);
+  assert.strictEqual(textarea.ranges, 0,
+    'writing a selection into an unfocused field has no caret to save');
+});
+
+it('the input event still goes out, after the caret is back', function () {
+  const textarea = typing('draw a cat', 5);
+  writeApi.writeTextarea(textarea, 'draw a cat' + SENTINEL);
+  assert.strictEqual(textarea.events.length, 1, 'Angular hears nothing without it');
+  assert.strictEqual(textarea.events[0].type, 'input');
+  assert.strictEqual(textarea.selectionStart, 5,
+    'restored before dispatch: the handler reads the field as the user left it');
+});
+
 console.log(failures ? '\n' + failures + ' failing' : '\nall passing');
 process.exitCode = failures ? 1 : 0;

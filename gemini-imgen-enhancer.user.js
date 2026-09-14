@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.67.0
+// @version      3.67.1
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -150,7 +150,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.67.0';
+  var VERSION = '3.67.1';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -2561,10 +2561,38 @@
 
   // Angular only notices a value that arrives through the native setter followed
   // by an input event; assigning textarea.value directly leaves its model stale.
+  //
+  // The caret is put back because the write lands mid-edit: the sentinel follows
+  // readiness, and readiness settles when the re-uploads the edit's own opening
+  // started land, seconds in, with the user typing. An assigned value collapses
+  // the selection to the end of the text, so the caret jumped out of the
+  // sentence on the first upload to land and again on the first to fail.
+  //
+  // The offsets are carried across on the common prefix rather than kept as they
+  // stand: the sentinel goes on at the end, but the user types on past it, so a
+  // strip can remove a character from before the caret. Anything inside the part
+  // both texts share keeps its offset; anything after it moves by the change in
+  // length, which is the removal counted without walking the text.
   function writeTextarea(textarea, value) {
     var setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    var typing = document.activeElement === textarea;
+    var before = textarea.value;
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
     setter.call(textarea, value);
+    if (typing) {
+      var shared = 0;
+      while (shared < before.length && shared < value.length
+        && before.charAt(shared) === value.charAt(shared)) shared++;
+      textarea.setSelectionRange(carryCaret(start, shared, value.length - before.length, value.length),
+        carryCaret(end, shared, value.length - before.length, value.length));
+    }
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function carryCaret(offset, shared, delta, length) {
+    var moved = offset <= shared ? offset : offset + delta;
+    return Math.max(0, Math.min(moved, length));
   }
 
   // The plan's own flag decides this, never a scan of the current text: a

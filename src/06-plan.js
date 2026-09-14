@@ -136,10 +136,38 @@
 
   // Angular only notices a value that arrives through the native setter followed
   // by an input event; assigning textarea.value directly leaves its model stale.
+  //
+  // The caret is put back because the write lands mid-edit: the sentinel follows
+  // readiness, and readiness settles when the re-uploads the edit's own opening
+  // started land, seconds in, with the user typing. An assigned value collapses
+  // the selection to the end of the text, so the caret jumped out of the
+  // sentence on the first upload to land and again on the first to fail.
+  //
+  // The offsets are carried across on the common prefix rather than kept as they
+  // stand: the sentinel goes on at the end, but the user types on past it, so a
+  // strip can remove a character from before the caret. Anything inside the part
+  // both texts share keeps its offset; anything after it moves by the change in
+  // length, which is the removal counted without walking the text.
   function writeTextarea(textarea, value) {
     var setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    var typing = document.activeElement === textarea;
+    var before = textarea.value;
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
     setter.call(textarea, value);
+    if (typing) {
+      var shared = 0;
+      while (shared < before.length && shared < value.length
+        && before.charAt(shared) === value.charAt(shared)) shared++;
+      textarea.setSelectionRange(carryCaret(start, shared, value.length - before.length, value.length),
+        carryCaret(end, shared, value.length - before.length, value.length));
+    }
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function carryCaret(offset, shared, delta, length) {
+    var moved = offset <= shared ? offset : offset + delta;
+    return Math.max(0, Math.min(moved, length));
   }
 
   // The plan's own flag decides this, never a scan of the current text: a
