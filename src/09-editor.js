@@ -157,6 +157,28 @@
     tile.classList.add('gpie-drop');
   }
 
+  // Claimed in the capture phase for the reason stated above the drag handler:
+  // Gemini watches the document for pasted files and takes them into the
+  // composer as a new message, so a paste meant for the message being edited
+  // has to be taken before that listener sees it.
+  //
+  // What is left alone is the larger half of this. Pasting text is what
+  // editing a prompt consists of, and a paste into the composer while an
+  // editor happens to sit open elsewhere on the page belongs to the page. Only
+  // a paste that both carries an image and landed inside the open editor is
+  // claimed; everything else reaches the page untouched.
+  function onDocumentPaste(ev) {
+    if (!plan || !plan.host || !ev.target) return;
+    if (!plan.host.contains(ev.target)) return;
+    var files = imageFilesOf(ev.clipboardData);
+    if (!files.length) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+    dbg('paste:', files.length, 'image(s) into message #' + plan.index);
+    files.forEach(function (file) { addFile(plan, file); });
+  }
+
   function addFile(p, file) {
     var entry = {
       kind: 'new',

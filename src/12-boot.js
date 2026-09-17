@@ -152,6 +152,7 @@
   ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) {
     document.addEventListener(type, onDocumentDrag, true);
   });
+  document.addEventListener('paste', onDocumentPaste, true);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);

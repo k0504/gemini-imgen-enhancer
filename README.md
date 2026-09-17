@@ -36,6 +36,7 @@ Open one of your own messages with the edit button. On a message with attachment
 - Drag a thumbnail to reorder.
 - `×` removes it.
 - The dashed `+` tile uploads a file and appends it; a file dropped onto it is uploaded the same way.
+- An image pasted anywhere inside the open editor is appended as well. Pasting text is unaffected.
 - **Reset** restores the original list.
 - Clicking a thumbnail opens it in Gemini's image viewer.
 
