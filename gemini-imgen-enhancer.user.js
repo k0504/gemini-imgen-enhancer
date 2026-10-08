@@ -5719,36 +5719,72 @@
     return dialog ? lhKey(dialog.src) : null;
   }
 
-  // The page names the conversation on the button itself. Gemini tags its
-  // logged controls with a `jslog` attribute, and the download button's carries
-  // a BardVeMetadataKey naming the response, the conversation and the candidate
-  // the image belongs to:
+  // Gemini tags its logged elements with a `jslog` attribute, and on a
+  // generated image and on a download button it carries a BardVeMetadataKey
+  // naming the response, the conversation and the candidate the image belongs
+  // to. The key is written as base64 of a JSON array, with further `;` fields
+  // after it:
   //
-  //   jslog="185865;track:...;BardVeMetadataKey:[["r_<hex>","c_<hex>",null,...]]"
+  //   jslog="185864;track:...;BardVeMetadataKey:W1sicl8...XQ==;mutable:true"
+  //   decoded: [["r_<hex>","c_<hex>",null,"rc_<hex>",...]]
   //
-  // Only the `c_` entry is read. The click resolves to the outer custom
+  // Only that form is read. Gemini wrote the JSON itself until 2026-10, and
+  // every reader that scanned the raw attribute stopped matching the day it
+  // changed - silently, because "names no turn" was also how an untagged image
+  // looked, and the download went to the page and delivered the small copy. So
+  // a key that is present and does not decode is not a miss: it throws, and
+  // the caller stops and says so. A jslog with no key at all is an element the
+  // page never tagged, and answers null.
+  //
+  // Serves three call sites: conversationTag(), targetOf() and
+  // markConversationImages().
+  function veMetadata(jslog, what) {
+    var found = /BardVeMetadataKey:([^;]*)/.exec(jslog || '');
+    if (!found) return null;
+    var value = found[1];
+    var text;
+    try {
+      if (!/^[A-Za-z0-9+\/]+={0,2}$/.test(value)) throw new Error('not base64');
+      text = atob(value);
+      if (!Array.isArray(JSON.parse(text))) throw new Error('not a JSON array');
+    } catch (err) {
+      var broken = new Error(what + ': the jslog BardVeMetadataKey is not base64 of a JSON array ('
+        + err.message + '; value begins "' + value.slice(0, 40) + '"). The jslog format changed'
+        + ' again; veMetadata() in src/13-library.js needs updating');
+      broken.name = 'JslogFormatError';
+      throw broken;
+    }
+    return text;
+  }
+
+  // The page names the conversation on the button itself. Only the `c_` entry
+  // of the metadata key is read. The click resolves to the outer custom
   // element while the attribute sits on the native button inside it, so the
   // element's own subtree is read first; the walk up the ancestors after it
   // covers a future move of the attribute up the tree. Ancestors are never
   // searched downward - high enough up, a descendant lookup would reach the
   // other cards and answer with some other image's conversation.
-  function conversationTag(node) {
-    var tag = node.getAttribute && node.getAttribute('jslog');
-    var m = tag && /"c_([0-9a-f]{16})"/.exec(tag);
+  //
+  // A metadata key that does not decode throws (see veMetadata()).
+  function conversationTag(node, what) {
+    var text = veMetadata(node.getAttribute && node.getAttribute('jslog'), what);
+    var m = text && /"c_([0-9a-f]{16})"/.exec(text);
     return m ? m[1] : null;
   }
 
-  function conversationNear(el) {
-    var conv = conversationTag(el);
+  function conversationNear(el, what) {
+    var conv = conversationTag(el, what);
     if (conv) return conv;
-    var tagged = el.querySelector && el.querySelector('[jslog*="c_"]');
-    if (tagged) {
-      conv = conversationTag(tagged);
+    // Every tagged descendant, not the first: a key of nothing but nulls is
+    // also a tag, and must not end the search.
+    var tagged = el.querySelectorAll ? el.querySelectorAll('[jslog*="BardVeMetadataKey"]') : [];
+    for (var i = 0; i < tagged.length; i++) {
+      conv = conversationTag(tagged[i], what);
       if (conv) return conv;
     }
     var node = el.parentElement;
     for (var up = 0; node && up < 8; up++) {
-      conv = conversationTag(node);
+      conv = conversationTag(node, what);
       if (conv) return conv;
       node = node.parentElement;
     }
@@ -5837,7 +5873,9 @@
     }
     var host = singleImageOf(button) || menuHost() || lastImage;
     if (!host || !host.isConnected) return null;
-    var named = /"(r_[0-9a-f]{16})"/.exec(host.getAttribute('jslog') || '');
+    // Throws on a format break; onDownloadClick() stops the click on it.
+    var text = veMetadata(host.getAttribute('jslog'), 'conversation image');
+    var named = text && /"(r_[0-9a-f]{16})"/.exec(text);
     var slot = parseInt(host.getAttribute('data-image-attachment-index'), 10);
     if (!named || isNaN(slot)) {
       dbg('download: this image names neither its turn nor its place in it');
@@ -5888,7 +5926,25 @@
     // ones those are, and it says it by the same rule this reads: a media token
     // on record. An image without one is the page's to download as it always
     // did - taking those buttons too left them delivering nothing at all.
-    var target = targetOf(button);
+    //
+    // A jslog that no longer decodes is not such an image. It is every image on
+    // the page at once, and handing those clicks to the page is how the format
+    // change of 2026-10 went unseen: each one delivered the small copy. The
+    // click is stopped and the break is reported instead.
+    var target, near;
+    try {
+      target = targetOf(button);
+      near = conversationNear(button,
+        appPath().indexOf('/library') === 0 ? 'library card' : 'conversation image');
+    } catch (err) {
+      if (err.name !== 'JslogFormatError') throw err;
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      say('error', LOG_IMG, 'download: stopped, nothing was saved. ' + err.message);
+      noteDownload('stopped: the jslog format changed, see the console', true);
+      return;
+    }
     if (!target || !downloadable(target, button)) {
       dbg('download: unmarked image, left to the page');
       return;
@@ -5912,7 +5968,7 @@
     // conversation load or from the card itself reaches a file by a different
     // road, and a mark on this page promises this road.
     var card = target.key ? cardOrigin(target.key) : null;
-    var conv = conversationNear(button) || conversationHere() || (card && card.conv);
+    var conv = near || conversationHere() || (card && card.conv);
     // A card names its turn but not which image in it, so it is answered for
     // only where that turn left one image in the library.
     var cardIsPlain = !!(card && card.resp && cardsOfTurn(card.resp) === 1);
@@ -6086,12 +6142,29 @@
   // slot within it - the same identity the download takes - rather than a key.
   // Without this the mark existed only where images are listed and not where
   // they are made, which reads as the mark being broken.
+  //
+  // An image whose jslog does not decode gets no mark and one error line per
+  // jslog value: this runs on every scan pass, and a page that re-renders an
+  // image keeps its value.
+  var jslogReported = Object.create(null);
+
   function markConversationImages() {
     if (appPath().indexOf('/app/') !== 0) return;
     var hosts = document.querySelectorAll('single-image[data-image-attachment-index]');
     for (var i = 0; i < hosts.length; i++) {
       var host = hosts[i];
-      var named = /"(r_[0-9a-f]{16})"/.exec(host.getAttribute('jslog') || '');
+      var jslog = host.getAttribute('jslog');
+      var text = null;
+      try {
+        text = veMetadata(jslog, 'conversation image');
+      } catch (err) {
+        if (err.name !== 'JslogFormatError') throw err;
+        if (!jslogReported[jslog]) {
+          jslogReported[jslog] = true;
+          say('error', LOG_IMG, 'mark: ' + err.message);
+        }
+      }
+      var named = text && /"(r_[0-9a-f]{16})"/.exec(text);
       var slot = parseInt(host.getAttribute('data-image-attachment-index'), 10);
       var known = !!(named && !isNaN(slot) && tokenForTurn(named[1], slot));
       var dot = host.querySelector(':scope > .gpie-origin-dot');
