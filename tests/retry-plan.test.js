@@ -34,7 +34,8 @@ function extract(name) {
 }
 
 const state = { refusals: [] };
-const names = ['planIsReady', 'isEditResend', 'applyPlanTo', 'settleExisting', 'attReusable'];
+const names = ['planIsReady', 'isEditResend', 'applyPlanTo', 'settleExisting', 'attReusable',
+  'whyPageListDiffers'];
 const body = names.map(extract).join('\n') + '\n; return { ' + names.join(', ') + ' };';
 const api = new Function('PROMPT_TUPLE', 'ATTACHMENTS', 'ACTION_INDEX', 'ACTION_EDIT_RESEND',
   'attClass', 'dbg', 'attShape', 'refuseSend', 'say', 'LOG_IMG', body)(
@@ -124,8 +125,10 @@ it('an ordinary edit waits on the same rule', function () {
 it('a retry sends the list the message already holds', function () {
   const base = [token('a.jpg'), token('b.jpg')];
   const inner = send(['a.jpg', 'b.jpg']);
-  assert.strictEqual(api.applyPlanTo(inner, retryPlan(base)), true);
-  assert.deepStrictEqual(inner[0][3], base, 'the record\'s own references, unconverted');
+  const page = inner[0][3];
+  assert.strictEqual(api.applyPlanTo(inner, retryPlan(base)), 'page',
+    'the page\'s list carries the record\'s files, so nothing is written');
+  assert.strictEqual(inner[0][3], page, 'the page\'s own references, unconverted');
   assert.strictEqual(inner[0][3][0].length, 3, 'a server reference keeps its three elements');
   assert.strictEqual(inner[72], 2, 'and the send stays the edit resend it is');
   assert.deepStrictEqual(state.refusals, []);
@@ -134,7 +137,7 @@ it('a retry sends the list the message already holds', function () {
 it('a retry refuses when the record and the message disagree on how many', function () {
   const p = retryPlan([token('a.jpg')]);
   p.originalCount = 2;
-  assert.strictEqual(api.applyPlanTo(send(['a.jpg', 'b.jpg']), p), false);
+  assert.strictEqual(api.applyPlanTo(send(['a.jpg', 'b.jpg']), p), 'refused');
   assert.strictEqual(state.refusals.length, 1, 'the send is refused');
   assert.ok(/holds 1 attachments against the 2/.test(state.refusals[0]),
     'the refusal names both counts: ' + state.refusals[0]);

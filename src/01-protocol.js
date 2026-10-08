@@ -79,7 +79,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.68.0';
+  var VERSION = '3.68.1';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -437,6 +437,84 @@
     }
   }
 
+  // The sends the server answered with BardErrorInfo, each with the body the
+  // page built beside the body that went out. Kept in localStorage, unlike the
+  // log above: the tab a refusal happened in is usually closed by the time it
+  // is looked at. Bounded by count and by the same character cap as the trace;
+  // a body is cut only when one alone would not fit.
+  var ERR_KEEP = 'gpieErrBodies';
+  var ERR_KEEP_ENTRIES = 5;
+  var ERR_KEEP_CHARS = 400000;
+  var ERR_BODY_CHARS = 150000;
+
+  function keepErrorBody(entry) {
+    ['page', 'sent'].forEach(function (side) {
+      var text = String(entry[side]);
+      entry[side + 'Length'] = text.length;
+      entry[side] = text.length > ERR_BODY_CHARS ? text.slice(0, ERR_BODY_CHARS) : text;
+    });
+    var kept;
+    try {
+      kept = JSON.parse(localStorage.getItem(ERR_KEEP) || '[]');
+    } catch (e) {
+      say('warn', LOG_IMG, 'localStorage.' + ERR_KEEP + ' does not parse (' + e
+        + '); it is started over so this refusal is kept');
+      kept = [];
+    }
+    if (!Array.isArray(kept)) kept = [];
+    kept.push(entry);
+    while (kept.length > ERR_KEEP_ENTRIES) kept.shift();
+    var text = JSON.stringify(kept);
+    while (text.length > ERR_KEEP_CHARS && kept.length > 1) {
+      kept.shift();
+      text = JSON.stringify(kept);
+    }
+    try {
+      localStorage.setItem(ERR_KEEP, text);
+    } catch (e) {
+      say('warn', LOG_IMG, 'the bodies of this refused send could not be kept in localStorage.'
+        + ERR_KEEP + ' (' + e + ', ' + text.length + ' chars); __gpBodies() still has the sent one');
+      return false;
+    }
+    return true;
+  }
+
+  // Where two StreamGenerate bodies differ, one line per field: the path into
+  // the decoded inner array and both values, cut short. Descends into arrays
+  // only as far as a single attachment's token, which is where the question it
+  // was written for lives; anything deeper is reported whole at that depth.
+  var DIFF_DEPTH = 4;
+  var DIFF_LINES = 40;
+
+  function bodyDiff(pageBody, sentBody) {
+    var a;
+    var b;
+    try {
+      a = JSON.parse(JSON.parse(new URLSearchParams(pageBody).get('f.req'))[1]);
+      b = JSON.parse(JSON.parse(new URLSearchParams(sentBody).get('f.req'))[1]);
+    } catch (e) {
+      return ['f.req: a body does not decode (' + e + '), compare the raw strings'];
+    }
+    var out = [];
+    function brief(v) {
+      var s = JSON.stringify(v);
+      if (s === undefined) return 'absent';
+      return s.length > 80 ? s.slice(0, 80) + '…(' + s.length + ')' : s;
+    }
+    (function walk(x, y, at, depth) {
+      if (out.length >= DIFF_LINES) return;
+      if (JSON.stringify(x) === JSON.stringify(y)) return;
+      if (Array.isArray(x) && Array.isArray(y) && depth < DIFF_DEPTH) {
+        for (var i = 0; i < Math.max(x.length, y.length); i++) {
+          walk(x[i], y[i], at + '[' + i + ']', depth + 1);
+        }
+        return;
+      }
+      out.push(at + ': ' + brief(x) + ' -> ' + brief(y));
+    })(a, b, 'inner', 0);
+    return out;
+  }
+
   // __gpBodies() in the console prints each kept send's decoded inner payload.
   (function exposeBodyDump() {
     var target = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -655,9 +733,18 @@
   function wrbRefusal(text, rpcId) {
     var head = '[["wrb.fr",' + (rpcId ? '"' + rpcId + '"' : 'null') + ',null';
     if (text.indexOf(head) === -1) return null;
-    var code = /BardErrorInfo",\[(\d+)\]/.exec(text);
+    var code = bardErrorCode(text);
     return (rpcId || 'ProcessFile') + ' answered, refusing the request'
-      + (code ? ' (error ' + code[1] + ')' : '');
+      + (code !== null ? ' (error ' + code + ')' : '');
+  }
+
+  // The code a refusal names, as a string, or null for an answer that names
+  // none. One reading for batchexecute and StreamGenerate alike: both write the
+  // error info unescaped, at the second element of the envelope.
+  //   [["wrb.fr",null,null,null,null,[13,null,[["type....BardErrorInfo",[1155]]]]]]
+  function bardErrorCode(text) {
+    var code = /BardErrorInfo",\[(\d+)\]/.exec(String(text));
+    return code ? code[1] : null;
   }
 
   function wrbPayload(text, rpcId) {

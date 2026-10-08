@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.68.0
+// @version      3.68.1
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -36,7 +36,9 @@
 //   §protocol   request field indices, attachment shapes, endpoints
 //   §config     tunables and version
 //   §trace      dbg behind a flag, info always on, attShape
-//   §bodies     every outgoing send kept for field-level comparison
+//   §bodies     every outgoing send kept for field-level comparison, and the
+//               page-built and sent bodies of any send refused with
+//               BardErrorInfo
 //   §page       WIZ_global_data recovery and small DOM helpers
 //   §rpc        one call into batchexecute, and the envelope both kinds
 //               of rpc answer in
@@ -50,7 +52,8 @@
 //   §upload     the three-step upload, and what counts as a contrib
 //   §plan       the edit in progress
 //   §freshen    turning every attachment into a contrib of this document
-//   §apply      writing the plan into the outgoing prompt tuple
+//   §apply      writing the plan into the outgoing prompt tuple, or leaving
+//               the page's own list when it already carries the plan
 //   §shape      choosing the shape the resend goes out in
 //   §resend     feature two, assembled: the editor's contribution to a send
 //   §commit     what every rewritten send owes the record, in one place
@@ -150,7 +153,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.68.0';
+  var VERSION = '3.68.1';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -508,6 +511,84 @@
     }
   }
 
+  // The sends the server answered with BardErrorInfo, each with the body the
+  // page built beside the body that went out. Kept in localStorage, unlike the
+  // log above: the tab a refusal happened in is usually closed by the time it
+  // is looked at. Bounded by count and by the same character cap as the trace;
+  // a body is cut only when one alone would not fit.
+  var ERR_KEEP = 'gpieErrBodies';
+  var ERR_KEEP_ENTRIES = 5;
+  var ERR_KEEP_CHARS = 400000;
+  var ERR_BODY_CHARS = 150000;
+
+  function keepErrorBody(entry) {
+    ['page', 'sent'].forEach(function (side) {
+      var text = String(entry[side]);
+      entry[side + 'Length'] = text.length;
+      entry[side] = text.length > ERR_BODY_CHARS ? text.slice(0, ERR_BODY_CHARS) : text;
+    });
+    var kept;
+    try {
+      kept = JSON.parse(localStorage.getItem(ERR_KEEP) || '[]');
+    } catch (e) {
+      say('warn', LOG_IMG, 'localStorage.' + ERR_KEEP + ' does not parse (' + e
+        + '); it is started over so this refusal is kept');
+      kept = [];
+    }
+    if (!Array.isArray(kept)) kept = [];
+    kept.push(entry);
+    while (kept.length > ERR_KEEP_ENTRIES) kept.shift();
+    var text = JSON.stringify(kept);
+    while (text.length > ERR_KEEP_CHARS && kept.length > 1) {
+      kept.shift();
+      text = JSON.stringify(kept);
+    }
+    try {
+      localStorage.setItem(ERR_KEEP, text);
+    } catch (e) {
+      say('warn', LOG_IMG, 'the bodies of this refused send could not be kept in localStorage.'
+        + ERR_KEEP + ' (' + e + ', ' + text.length + ' chars); __gpBodies() still has the sent one');
+      return false;
+    }
+    return true;
+  }
+
+  // Where two StreamGenerate bodies differ, one line per field: the path into
+  // the decoded inner array and both values, cut short. Descends into arrays
+  // only as far as a single attachment's token, which is where the question it
+  // was written for lives; anything deeper is reported whole at that depth.
+  var DIFF_DEPTH = 4;
+  var DIFF_LINES = 40;
+
+  function bodyDiff(pageBody, sentBody) {
+    var a;
+    var b;
+    try {
+      a = JSON.parse(JSON.parse(new URLSearchParams(pageBody).get('f.req'))[1]);
+      b = JSON.parse(JSON.parse(new URLSearchParams(sentBody).get('f.req'))[1]);
+    } catch (e) {
+      return ['f.req: a body does not decode (' + e + '), compare the raw strings'];
+    }
+    var out = [];
+    function brief(v) {
+      var s = JSON.stringify(v);
+      if (s === undefined) return 'absent';
+      return s.length > 80 ? s.slice(0, 80) + '…(' + s.length + ')' : s;
+    }
+    (function walk(x, y, at, depth) {
+      if (out.length >= DIFF_LINES) return;
+      if (JSON.stringify(x) === JSON.stringify(y)) return;
+      if (Array.isArray(x) && Array.isArray(y) && depth < DIFF_DEPTH) {
+        for (var i = 0; i < Math.max(x.length, y.length); i++) {
+          walk(x[i], y[i], at + '[' + i + ']', depth + 1);
+        }
+        return;
+      }
+      out.push(at + ': ' + brief(x) + ' -> ' + brief(y));
+    })(a, b, 'inner', 0);
+    return out;
+  }
+
   // __gpBodies() in the console prints each kept send's decoded inner payload.
   (function exposeBodyDump() {
     var target = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -726,9 +807,18 @@
   function wrbRefusal(text, rpcId) {
     var head = '[["wrb.fr",' + (rpcId ? '"' + rpcId + '"' : 'null') + ',null';
     if (text.indexOf(head) === -1) return null;
-    var code = /BardErrorInfo",\[(\d+)\]/.exec(text);
+    var code = bardErrorCode(text);
     return (rpcId || 'ProcessFile') + ' answered, refusing the request'
-      + (code ? ' (error ' + code[1] + ')' : '');
+      + (code !== null ? ' (error ' + code + ')' : '');
+  }
+
+  // The code a refusal names, as a string, or null for an answer that names
+  // none. One reading for batchexecute and StreamGenerate alike: both write the
+  // error info unescaped, at the second element of the envelope.
+  //   [["wrb.fr",null,null,null,null,[13,null,[["type....BardErrorInfo",[1155]]]]]]
+  function bardErrorCode(text) {
+    var code = /BardErrorInfo",\[(\d+)\]/.exec(String(text));
+    return code ? code[1] : null;
   }
 
   function wrbPayload(text, rpcId) {
@@ -1494,6 +1584,10 @@
   // Within this document. A reload reads the message from the server, which
   // holds what the resend actually sent, so the page is correct again on its
   // own; the record is what covers a second edit made before that reload.
+  //
+  // Outranking is about which attachments, not whose references. Where the
+  // page's list names the record's files in the record's order, the page's
+  // references are the ones sent: see whyPageListDiffers in §apply.
   function recordThumbs(index, ifNone) {
     var o = overrideAt(index);
     if (!o) return ifNone();
@@ -1517,6 +1611,29 @@
   function recordBlobs(index) {
     var o = overrideAt(index);
     return o && Array.isArray(o.blobs) ? o.blobs.slice() : null;
+  }
+
+  // Which records this document resent with other images under file names the
+  // page's stale list already carries (namesShadowPage in §apply). Held here
+  // rather than on the record: releaseOffPath drops a record on every route
+  // change and restoreOverrides reads it back without this, while the page's
+  // list it describes is stale until a reload, route changes included. Never
+  // stored, because a reload is what makes the page's list the server's again.
+  var pageNamesUnreliable = {};
+
+  function notePageNames(index, path, unreliable) {
+    var key = path + '#' + index;
+    if (unreliable) {
+      pageNamesUnreliable[key] = true;
+      dbg('record: message #' + index + ' now holds other images under file names the '
+        + 'page\'s list still carries; its list is not read off the page until a reload');
+    } else {
+      delete pageNamesUnreliable[key];
+    }
+  }
+
+  function recordNamesUnreliable(index) {
+    return pageNamesUnreliable[appPath() + '#' + index] === true;
   }
 
   function overrideAtPath(index, path) {
@@ -2116,9 +2233,13 @@
   }
 
   // §refresh =================================================================
-  // Upgrading a record from what was sent to the durable references the server
+  // Upgrading the uploads in a record to the durable references the server
   // assigned. StreamGenerate's own response never carries them; the
-  // conversation-load rpc does.
+  // conversation-load rpc does. A token the record already holds is left as
+  // sent: this rpc answers with a new value every time, and a send reads the
+  // page's own references wherever the page's list carries the record's files
+  // (whyPageListDiffers), so the upgrade exists for a contrib, which dies with
+  // its ttl and with the document that minted it.
   //
   // Attachments in that response are 16-element tuples: [2] file name,
   // [3] thumbnail URL, [5] the $AXzLiR token, [11] mime. The list appears twice
@@ -2268,7 +2389,29 @@
           + 'flight (generation ' + gen + ' -> ' + (current ? current.gen : 'gone') + ')');
         return;
       }
-      current.attachments = tuples.map(function (t) {
+      // Position by position, so the names have to agree in order as well as
+      // in sum: the match above is on the multiset, and an upgrade written
+      // against a list in another order would put each token under the wrong
+      // file and thumbnail.
+      var misplaced = [];
+      current.attachments.forEach(function (att, i) {
+        if (att[1] !== tuples[i][2]) misplaced.push(i + ': ' + att[1] + ' / ' + tuples[i][2]);
+      });
+      if (misplaced.length) {
+        throw new Error('the server lists message #' + index + '\'s files in another order '
+          + 'than the record (' + misplaced.join(', ') + '), so no reference can be paired '
+          + 'with its file; the record is left as sent');
+      }
+      // Only an upload is upgraded. A contrib dies with its ttl and with the
+      // document that minted it, and a token does not, so a token already in
+      // the record - the page's own, sent as it stood - is kept as it is. This
+      // rpc issues a new token on every answer: overwriting one would put a
+      // value the page never sent into every later send that reads the record.
+      var upgraded = 0;
+      current.attachments = current.attachments.map(function (att, i) {
+        if (attClass(att).indexOf('contrib-') !== 0) return att;
+        upgraded++;
+        var t = tuples[i];
         return [[null, 1, 1, t[11]], t[2], t[5]];
       });
       var served = tuples.map(function (t) { return t[3]; });
@@ -2292,7 +2435,8 @@
       persistOverrides(path);
       dropView(current);
       schedule();
-      dbg('record upgraded to server references', tuples.length);
+      dbg('record upgraded to server references:', upgraded, 'of', tuples.length,
+        'were uploads; the rest are kept as sent');
     }).catch(function (err) {
       // The record still holds what was sent, which stays correct, only slower
       // on the next resend. Named so the console shows why that will be.
@@ -2447,6 +2591,9 @@
     });
     var base = recordAttachments(index);
     var baseBlobs = recordBlobs(index);
+    // Whether a page list carrying the record's file names proves anything
+    // about which images it holds. See whyPageListDiffers.
+    var baseUnreliable = recordNamesUnreliable(index);
     // Asked as edit mode opens, so a message that cannot be resent says so
     // while the user is still deciding rather than on the press. See §durable
     // for what puts a record in this state; none of it is repairable from here.
@@ -2476,6 +2623,7 @@
       path: appPath(),
       base: base,
       baseBlobs: baseBlobs,
+      baseUnreliable: baseUnreliable,
       blocked: blocked,
       // Declared by §retry before it opened edit mode. A retry changes no
       // image; what the flag does for the plan is make planIsDirty report it
@@ -2852,10 +3000,74 @@
     return action === ACTION_RETRY || action === ACTION_RETRY_PRO;
   }
 
-  // Writes the plan into the outgoing prompt tuple. null means only that this
-  // send is not the one the plan was made for; true that the attachment list
-  // was written, false that it was backed out of - a send that is still an edit
-  // resend, and still owes the record everything §commit gives one.
+  // Whether the list the page built is the record's list in the page's own
+  // references. null when it is; otherwise why not, for the trace.
+  //
+  // The record says which attachments a message holds; the page's list says
+  // the same thing in the references the page itself was handed. Those are not
+  // the same strings even for the same files: hNvQHb issues a new token on
+  // every answer, so a record §refresh upgraded holds values the page never
+  // sent. Edit resends that carried the record's values over a page list naming
+  // the same files were answered with BardErrorInfo 1155, and the same edit sent
+  // by the page was not. So where the page's list carries the record's files,
+  // it is the page's references that go out.
+  //
+  // A file name is the identity available here, as in §refresh: a form A tuple
+  // carries no thumbnail. It is not enough on its own within the document that
+  // resent the message: the page keeps the list from before that resend, and a
+  // resend that put a different image under a name already in the list leaves
+  // the page's stale list and the record naming the same files. commitSend
+  // marks a record in that state (namesShadowPage), and such a record is never
+  // read off the page until a reload has put the server's list on it.
+  function whyPageListDiffers(page, record, unreliable) {
+    if (!Array.isArray(page)) return 'the page built no attachment list';
+    if (unreliable) {
+      return 'this document resent the message with other images under the same file names';
+    }
+    if (page.length !== record.length) {
+      return 'the page lists ' + page.length + ' attachments, the record ' + record.length;
+    }
+    for (var i = 0; i < record.length; i++) {
+      var mine = Array.isArray(page[i]) ? page[i][1] : undefined;
+      var theirs = Array.isArray(record[i]) ? record[i][1] : undefined;
+      if (typeof mine !== 'string' || mine !== theirs) {
+        return 'attachment ' + i + ' is ' + JSON.stringify(mine) + ' on the page and '
+          + JSON.stringify(theirs) + ' in the record';
+      }
+      // A reference the server would not take is not one the page can be
+      // trusted to express the record with; the record's own is written.
+      if (!attReusable(page[i])) {
+        return 'attachment ' + i + ' on the page is ' + attClass(page[i]);
+      }
+    }
+    return null;
+  }
+
+  // Whether the list this send writes leaves the page's stale list naming the
+  // same files while holding other images, which is the state in which
+  // whyPageListDiffers must not read the page until a reload. Once set it holds
+  // for every later write in this document: the page's list does not move.
+  function namesShadowPage(p, page, written) {
+    if (p.baseUnreliable) return true;
+    if (!Array.isArray(page) || page.length !== written.length) return false;
+    for (var i = 0; i < written.length; i++) {
+      if (!Array.isArray(page[i]) || page[i][1] !== written[i][1]) return false;
+    }
+    // Same names in the same places. Only an entry that is not the image the
+    // page held at that place - a new upload, or one moved there - makes those
+    // names say something false. A re-upload in place is the same image.
+    return p.entries.some(function (entry, at) {
+      return entry.kind !== 'existing' || entry.index !== at;
+    });
+  }
+
+  // Writes the plan into the outgoing prompt tuple. Answers one of:
+  //   null       this send is not the one the plan was made for
+  //   'page'     the page's own list already carries the plan, and goes out
+  //              untouched
+  //   'written'  the plan's list was written over the page's
+  //   'refused'  there is no correct list to write; the send is refused, and
+  //              §resend reads that
   //
   // The sentinel is not this function's to strip. rewrite() takes it off every
   // send that carries it, plan or no plan, which is the only rule that also
@@ -2868,22 +3080,28 @@
     }
 
     var tuple = inner[PROMPT_TUPLE];
-    var listWritten = false;
+    var page = tuple[ATTACHMENTS];
 
-    // The body's own list is what this message holds only while it has never
-    // been resent; after that the record is, and the body carries the stale one.
-    var base = p.base || tuple[ATTACHMENTS];
-    dbg('applyPlanTo: body carries', attShape(tuple[ATTACHMENTS]));
-    dbg('applyPlanTo: base =', p.base ? 'record' : 'body', '(' + attShape(base) + ')');
+    // Which list an existing entry's reference is read from. With no record the
+    // page's list is the only one there is. With one, the page's list is still
+    // read when it carries the record's files, so the references the page was
+    // handed are the ones that go out; the record's are written only for a page
+    // list that names something else, which is the list from before this
+    // message was last resent.
+    var differs = p.base ? whyPageListDiffers(page, p.base, p.baseUnreliable) : null;
+    var base = differs ? p.base : page;
+    dbg('applyPlanTo: body carries', attShape(page));
+    dbg('applyPlanTo: base =', !p.base ? 'body (no record)'
+      : differs ? 'record, because ' + differs : 'body (it carries the record\'s files)',
+      '(' + attShape(base) + ')');
     dbg('applyPlanTo: plan wants', p.entries.map(function (e) {
       return e.kind === 'existing' ? 'existing#' + e.index : 'new:' + e.name;
     }).join(', '));
 
     // What each entry goes out as, verbatim. An existing entry sent as it
-    // stands is the base's own tuple - the record's, or the page's for a
-    // message never resent - tail and all: this is the page's own edit resend,
-    // so the page's own form is right. One that was re-uploaded is the contrib
-    // its upload minted, and a new entry likewise. Nothing is reshaped.
+    // stands is the base's own tuple, tail and all: this is the page's own edit
+    // resend, so the page's own form is right. One that was re-uploaded is the
+    // contrib its upload minted, and a new entry likewise. Nothing is reshaped.
     var refs = p.entries.map(function (entry) {
       if (entry.kind !== 'existing') return entry.attachment || null;
       if (!entry.sendAsIs) return entry.freshAttachment || null;
@@ -2906,17 +3124,27 @@
     if (missing) {
       refuseSend(missing + ' of the attachments for message #' + p.index
         + ' have nothing to be written from');
-    } else if (count !== p.originalCount) {
+      return 'refused';
+    }
+    if (count !== p.originalCount) {
       refuseSend('the record for message #' + p.index + ' holds ' + count
         + ' attachments against the ' + p.originalCount + ' the editor opened with, '
         + 'so which list to write cannot be established');
-    } else {
-      tuple[ATTACHMENTS] = refs;
-      listWritten = true;
-      dbg('applyPlanTo: wrote', attShape(tuple[ATTACHMENTS]));
+      return 'refused';
     }
 
-    return listWritten;
+    // Every reference is the page's own, in the page's own places: the plan
+    // asks for exactly the list the page built, so nothing is written and the
+    // request carries it as the page made it.
+    var pageStands = Array.isArray(page) && refs.length === page.length
+      && refs.every(function (ref, at) { return ref === page[at]; });
+    if (pageStands) {
+      dbg('applyPlanTo: the page\'s own list carries the plan, nothing written');
+      return 'page';
+    }
+    tuple[ATTACHMENTS] = refs;
+    dbg('applyPlanTo: wrote', attShape(tuple[ATTACHMENTS]));
+    return 'written';
   }
 
   // §shape ===================================================================
@@ -3017,7 +3245,8 @@
   // back with it so nothing downstream has to special-case a missing one; no
   // transport reads it, because every transport checks `refuse` first.
   function refusalResult(body) {
-    return { body: body, reload: false, refresh: null, strip: null, refuse: pendingRefusal };
+    return { body: body, page: body, target: null, conv: null,
+      reload: false, refresh: null, strip: null, refuse: pendingRefusal };
   }
 
   // Only when the send really is the resend: a plan left idling while the user
@@ -3046,9 +3275,13 @@
   // filed that list back onto the turn, so the next edit read it back as the
   // message's own and the divergence outlived the press.
   //
-  // The record's tuples go out as they stand: no freshen, no reshape. The
-  // server already holds these references, and §retry measured the converted
-  // shape at 78.2s against 6.3s for leaving them alone.
+  // Where the page's list carries the record's files in the record's order, it
+  // goes out untouched: the record decides which attachments, and the page's
+  // own references say the same thing in values the page was handed (see
+  // whyPageListDiffers). Otherwise the record's tuples go out as they stand:
+  // no freshen, no reshape. The server already holds these references, and
+  // §retry measured the converted shape at 78.2s against 6.3s for leaving them
+  // alone.
   //
   // Nothing is committed. A regenerate replaces the answer to the last turn, so
   // there are no later turns to discard, and the list written here is the
@@ -3075,6 +3308,7 @@
         + 'those are the images that message now holds cannot be established; reopen '
         + 'the message and resend it instead');
     }
+    sendTarget = index;
     var base = recordAttachments(index);
     // Not a downgrade. A message this script has never resent is described by
     // the page correctly, and that is most of them.
@@ -3082,6 +3316,15 @@
       dbg('nativeRetry: message #' + index + ' has no record, the page\'s own list stands');
       return null;
     }
+    // The same rule as an edit resend's: a page list carrying the record's
+    // files goes out in the page's own references. See whyPageListDiffers.
+    var differs = whyPageListDiffers(body, base, recordNamesUnreliable(index));
+    if (!differs) {
+      dbg('nativeRetry: message #' + index + ', the page\'s own list carries the record, '
+        + 'nothing written |', attShape(body));
+      return null;
+    }
+    dbg('nativeRetry: message #' + index + ', the record is written because', differs);
     if (base.length !== body.length) {
       return refuseSend('the record for message #' + index + ' holds ' + base.length
         + ' attachments against the ' + body.length + ' this regenerate carries, so which '
@@ -3120,6 +3363,7 @@
     if (isNativeRetry(inner)) return nativeRetryContribution(inner);
     var p = activePlan();
     if (!p) { dbg('editorContribution: no active plan, leaving attachments alone'); return null; }
+    if (isEditResend(inner)) sendTarget = p.index;
 
     var dirty = planIsDirty(p);
     dbg('editorContribution: plan #' + p.index + ', dirty =', dirty + ', record =', !!p.base);
@@ -3134,9 +3378,10 @@
     // own references, or the page's for a message never resent, and that is
     // what every edit now sends for the images it leaves alone: see §freshen.
     //
-    // An unchanged list still has to be written when the message carries a
-    // record, because the body Gemini builds is the one from before the resend
-    // that produced it. With no record and no change there is no list worth
+    // An unchanged list still goes through applyPlanTo when the message carries
+    // a record, because the body Gemini builds may be the one from before the
+    // resend that produced it; applyPlanTo leaves it untouched when it is not.
+    // With no record and no change there is no list worth
     // writing - but the send is still a resend of an edited message, the server
     // still discards every turn after it, and the records for those turns still
     // have to go with them. Leaving before the commit is what left them behind
@@ -3151,7 +3396,7 @@
         return null;
       }
       dbg('editorContribution: nothing to write, the body goes as it stands and the record is held');
-      commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], false);
+      commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], false, false);
       plan = null;
       teardownEditorUi();
       return null;
@@ -3174,18 +3419,25 @@
         }).join(', '));
     }
 
-    var listWritten = applyPlanTo(inner, p);
-    if (listWritten === null) return null;
-    // False is no longer a send that goes out with the page's list; applyPlanTo
-    // has refused it, and rewrite() reads that. Nothing is committed, because
-    // nothing departs and the server discards no turns.
-    if (!listWritten) return null;
+    // Read before applyPlanTo can replace it: what the page built is what
+    // namesShadowPage compares the written list against.
+    var page = inner[PROMPT_TUPLE][ATTACHMENTS];
+    var verdict = applyPlanTo(inner, p);
+    // A refusal has been raised, and rewrite() reads it. Nothing is committed,
+    // because nothing departs and the server discards no turns.
+    if (verdict !== 'written' && verdict !== 'page') return null;
 
-    dbg(dirty ? 'attachments rewritten' : 'attachments restored',
-      p.originalCount, '->', p.entries.length);
-    if (!guardSendShape(inner, inner[PROMPT_TUPLE][ATTACHMENTS], p)) return null;
+    var sent = inner[PROMPT_TUPLE][ATTACHMENTS];
+    dbg(verdict === 'page' ? 'attachments: the page\'s own list stands'
+      : dirty ? 'attachments rewritten' : 'attachments restored',
+    p.originalCount, '->', p.entries.length);
+    if (!guardSendShape(inner, sent, p)) return null;
 
-    var reload = commitSend(p, inner[PROMPT_TUPLE][ATTACHMENTS], listWritten);
+    // Either way the list that departs is one the plan's entries line up with
+    // position for position, so the record is written from it: the page's own
+    // references when they stood, which is what the next send compares against.
+    var reload = commitSend(p, sent, true,
+      verdict === 'written' && namesShadowPage(p, page, sent));
 
     plan = null;
     // The plan is spent, so the toolbar has nothing left to describe. Clearing
@@ -3206,7 +3458,10 @@
   // send can take is what dropped images: each route remembered a different
   // part of the list, and a retry - which changes nothing, and so looked like
   // it owed nothing - skipped the upgrade that every later send reads from.
-  function commitSend(p, written, listWritten) {
+  //
+  // namesUnreliable is namesShadowPage's verdict on this send, and is noted
+  // beside the record it describes: see whyPageListDiffers.
+  function commitSend(p, written, listWritten, namesUnreliable) {
     // Held, not done. The server discards the turns after this one when the
     // send lands, so the records that describe them are discarded then too -
     // and a send that never reached it truncated nothing, so there is nothing
@@ -3250,6 +3505,7 @@
       written,
       blobs
     );
+    if (stored) notePageNames(p.index, p.path, namesUnreliable);
 
     // Whether a stripped send owes a refresh is decided in armSendOutcome, which
     // returns on result.strip before it ever reads result.refresh. Guarding it
@@ -3285,6 +3541,10 @@
   // Set when the send's conversation tuple was cleared: the real conversation
   // id the streamed response must keep showing.
   var pendingStrip = null;
+  // The message ordinal the send is aimed at, where this script knows it: an
+  // edit resend's plan, or the message a regenerate repeats. Read by the
+  // BardErrorInfo report, which has to say which message was refused.
+  var sendTarget = null;
 
   // The conversation tuple decides which turn a regenerate is aimed at, so
   // comparing one send against another means comparing this. Values are cut
@@ -3327,10 +3587,14 @@
     return out.join(' ');
   }
 
-  // Returns { body, reload, refresh, strip }; body is the original string when
-  // nothing applied.
+  // Returns { body, page, target, conv, reload, refresh, strip, refuse }; body
+  // is what goes out, and is the original string when nothing applied. page is
+  // the body as the page built it, taken here at the entry before anything is
+  // edited, so a refused answer can be compared against what was rewritten.
   function rewrite(url, body) {
-    var unchanged = { body: body, reload: false, refresh: null, strip: null, refuse: null };
+    sendTarget = null;
+    var unchanged = { body: body, page: body, target: null, conv: null,
+      reload: false, refresh: null, strip: null, refuse: null };
     if (typeof url !== 'string' || url.indexOf('StreamGenerate') === -1) return unchanged;
     dbg('rewrite: StreamGenerate intercepted, body', typeof body === 'string' ? body.length + ' chars' : typeof body);
     if (typeof body !== 'string') return unchanged;
@@ -3353,6 +3617,9 @@
         + ', prompt "' + String(inner[PROMPT_TUPLE][PROMPT_TEXT]).slice(0, 40) + '"'
         + ', attachments =', attShape(inner[PROMPT_TUPLE][ATTACHMENTS]));
       dbg('rewrite: conversation =', tupleShape(inner[CONVERSATION_INDEX]));
+      var convTuple = inner[CONVERSATION_INDEX];
+      unchanged.conv = Array.isArray(convTuple) && typeof convTuple[0] === 'string'
+        && convTuple[0] ? convTuple[0] : null;
       dbg('rewrite: inner =', innerShape(inner));
       dbg('rewrite: query =', Array.prototype.join.call(
         Array.from(new URLSearchParams(url.split('?')[1] || '').keys()), ','));
@@ -3379,6 +3646,7 @@
       }
 
       var attachmentsChanged = editorContribution(inner);
+      unchanged.target = sendTarget;
       // Ahead of everything else this function still had to do. A refusal is
       // not a body, so nothing below it - the shape probe, the serialise, the
       // hold the transport would claim - has anything to act on.
@@ -3398,7 +3666,8 @@
       var newBody = params.toString();
       doneSer();
       dbg('rewrite: reload =', reload + ', refresh =', JSON.stringify(pendingRefresh));
-      return { body: newBody, reload: reload, refresh: pendingRefresh, strip: pendingStrip };
+      return { body: newBody, page: body, target: unchanged.target, conv: unchanged.conv,
+        reload: reload, refresh: pendingRefresh, strip: pendingStrip, refuse: null };
     } catch (e) {
       // A send with a plan armed against it is one this script owes an
       // attachment list, and passing it through unwritten sends the list the
@@ -3491,6 +3760,59 @@
     }
     parts.push(tail);
     info('send: ' + parts.join(' | '));
+  }
+
+  // A StreamGenerate the server turns down still answers http 200: a short body
+  // whose second envelope carries BardErrorInfo and a code, 1155 among them.
+  // Nothing about the status tells it from a made turn, so the body is read.
+  //
+  // What is kept is the pair that decides the question: the body the page
+  // built, taken at the entry of rewrite(), and the body that went out. Both
+  // are kept even for a send this script left alone, where they are the same
+  // string, because "this script did not touch it" is then the finding.
+  function reportBardError(text, result) {
+    var code = bardErrorCode(text);
+    if (code === null) return false;
+    var rewritten = result.body !== result.page;
+    var diff = rewritten ? bodyDiff(result.page, result.body) : [];
+    say('error', LOG_IMG, 'StreamGenerate answered BardErrorInfo ' + code + ' for '
+      + (result.target === null || result.target === undefined
+        ? 'a send not aimed at a message this script tracks'
+        : 'message #' + result.target)
+      + ' in conversation ' + (result.conv || '(none)') + '; '
+      + (rewritten
+        ? 'this script rewrote the request the page built (' + diff.length + ' field'
+          + (diff.length === 1 ? '' : 's') + ' differ: ' + diff.map(function (line) {
+            return line.split(':')[0];
+          }).join(', ') + ')'
+        : 'the request went out as the page built it')
+      + '. Both bodies are kept in localStorage.' + ERR_KEEP + ' for comparison.');
+    keepErrorBody({
+      at: stamp(),
+      version: VERSION,
+      code: code,
+      index: result.target === undefined ? null : result.target,
+      conv: result.conv || null,
+      rewritten: rewritten,
+      page: result.page,
+      sent: result.body,
+      diff: diff
+    });
+    return true;
+  }
+
+  function watchBardError(xhr, result) {
+    xhr.addEventListener('load', function () {
+      // responseText throws for any other response type, and the page has
+      // always read this one as text; a change there is named rather than
+      // allowed to take the check down silently.
+      if (xhr.responseType && xhr.responseType !== 'text') {
+        say('warn', LOG_IMG, 'StreamGenerate answered as responseType '
+          + JSON.stringify(xhr.responseType) + ', so it cannot be checked for BardErrorInfo');
+        return;
+      }
+      reportBardError(xhr.responseText || '', result);
+    });
   }
 
   function traceStream(xhr, w, sent) {
@@ -3648,6 +3970,7 @@
     if (typeof this.__gemUrl === 'string' && this.__gemUrl.indexOf('StreamGenerate') !== -1) {
       dbg('xhr: sending StreamGenerate, body', result.body === body ? 'untouched' : 'rewritten');
       keepBody(this.__gemUrl, result.body, result.body !== body);
+      watchBardError(this, result);
       // Read here, at the send, so the abort hook above compares against the
       // conversation this request was made in and not against wherever the
       // page has got to by the time the abort arrives.
@@ -3756,6 +4079,13 @@
         promise = promise.then(function (res) {
           if (serverRefused(res)) sendFailed(hold, 'http ' + res.status);
           else sendLanded(hold);
+          // A clone, so the page still reads the stream it asked for.
+          res.clone().text().then(function (text) {
+            reportBardError(text, result);
+          }, function (err) {
+            say('warn', LOG_IMG, 'the StreamGenerate answer could not be read back to check it '
+              + 'for BardErrorInfo (' + err + '); a refusal on this send would go unreported');
+          });
           return res;
         }, function (err) {
           // An abort is the local end hanging up on a request the server

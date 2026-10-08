@@ -585,6 +585,10 @@
   // Within this document. A reload reads the message from the server, which
   // holds what the resend actually sent, so the page is correct again on its
   // own; the record is what covers a second edit made before that reload.
+  //
+  // Outranking is about which attachments, not whose references. Where the
+  // page's list names the record's files in the record's order, the page's
+  // references are the ones sent: see whyPageListDiffers in §apply.
   function recordThumbs(index, ifNone) {
     var o = overrideAt(index);
     if (!o) return ifNone();
@@ -608,6 +612,29 @@
   function recordBlobs(index) {
     var o = overrideAt(index);
     return o && Array.isArray(o.blobs) ? o.blobs.slice() : null;
+  }
+
+  // Which records this document resent with other images under file names the
+  // page's stale list already carries (namesShadowPage in §apply). Held here
+  // rather than on the record: releaseOffPath drops a record on every route
+  // change and restoreOverrides reads it back without this, while the page's
+  // list it describes is stale until a reload, route changes included. Never
+  // stored, because a reload is what makes the page's list the server's again.
+  var pageNamesUnreliable = {};
+
+  function notePageNames(index, path, unreliable) {
+    var key = path + '#' + index;
+    if (unreliable) {
+      pageNamesUnreliable[key] = true;
+      dbg('record: message #' + index + ' now holds other images under file names the '
+        + 'page\'s list still carries; its list is not read off the page until a reload');
+    } else {
+      delete pageNamesUnreliable[key];
+    }
+  }
+
+  function recordNamesUnreliable(index) {
+    return pageNamesUnreliable[appPath() + '#' + index] === true;
   }
 
   function overrideAtPath(index, path) {
@@ -1207,9 +1234,13 @@
   }
 
   // §refresh =================================================================
-  // Upgrading a record from what was sent to the durable references the server
+  // Upgrading the uploads in a record to the durable references the server
   // assigned. StreamGenerate's own response never carries them; the
-  // conversation-load rpc does.
+  // conversation-load rpc does. A token the record already holds is left as
+  // sent: this rpc answers with a new value every time, and a send reads the
+  // page's own references wherever the page's list carries the record's files
+  // (whyPageListDiffers), so the upgrade exists for a contrib, which dies with
+  // its ttl and with the document that minted it.
   //
   // Attachments in that response are 16-element tuples: [2] file name,
   // [3] thumbnail URL, [5] the $AXzLiR token, [11] mime. The list appears twice
@@ -1359,7 +1390,29 @@
           + 'flight (generation ' + gen + ' -> ' + (current ? current.gen : 'gone') + ')');
         return;
       }
-      current.attachments = tuples.map(function (t) {
+      // Position by position, so the names have to agree in order as well as
+      // in sum: the match above is on the multiset, and an upgrade written
+      // against a list in another order would put each token under the wrong
+      // file and thumbnail.
+      var misplaced = [];
+      current.attachments.forEach(function (att, i) {
+        if (att[1] !== tuples[i][2]) misplaced.push(i + ': ' + att[1] + ' / ' + tuples[i][2]);
+      });
+      if (misplaced.length) {
+        throw new Error('the server lists message #' + index + '\'s files in another order '
+          + 'than the record (' + misplaced.join(', ') + '), so no reference can be paired '
+          + 'with its file; the record is left as sent');
+      }
+      // Only an upload is upgraded. A contrib dies with its ttl and with the
+      // document that minted it, and a token does not, so a token already in
+      // the record - the page's own, sent as it stood - is kept as it is. This
+      // rpc issues a new token on every answer: overwriting one would put a
+      // value the page never sent into every later send that reads the record.
+      var upgraded = 0;
+      current.attachments = current.attachments.map(function (att, i) {
+        if (attClass(att).indexOf('contrib-') !== 0) return att;
+        upgraded++;
+        var t = tuples[i];
         return [[null, 1, 1, t[11]], t[2], t[5]];
       });
       var served = tuples.map(function (t) { return t[3]; });
@@ -1383,7 +1436,8 @@
       persistOverrides(path);
       dropView(current);
       schedule();
-      dbg('record upgraded to server references', tuples.length);
+      dbg('record upgraded to server references:', upgraded, 'of', tuples.length,
+        'were uploads; the rest are kept as sent');
     }).catch(function (err) {
       // The record still holds what was sent, which stays correct, only slower
       // on the next resend. Named so the console shows why that will be.

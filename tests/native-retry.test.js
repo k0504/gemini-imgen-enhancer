@@ -52,10 +52,11 @@ const state = {
   recordAt: 0,
   lastIndex: 0,
   stale: [],
+  unreliable: false,
   refusals: []
 };
 
-const api = load(['nativeRetryContribution'], {
+const api = load(['nativeRetryContribution', 'whyPageListDiffers', 'attReusable'], {
   PROMPT_TUPLE: 0,
   ATTACHMENTS: 3,
   ACTION_INDEX: 72,
@@ -67,13 +68,21 @@ const api = load(['nativeRetryContribution'], {
   // raised refusal into a request that never goes out.
   refuseSend: function (why) { state.refusals.push(why); return null; },
   attShape: function (list) { return Array.isArray(list) ? list.map((a) => a[1]).join(', ') : String(list); },
+  // By shape first, as attClass reads it: a page token and a record upload can
+  // carry the same file name, and only the upload can be one that expired.
   attClass: function (att) {
-    return state.stale.indexOf(att[1]) === -1 ? 'token' : 'contrib-stale';
+    const isContrib = Array.isArray(att) && Array.isArray(att[0]) && typeof att[0][0] === 'string';
+    if (!isContrib) return 'token';
+    return state.stale.indexOf(att[1]) === -1 ? 'contrib-live' : 'contrib-stale';
   },
   recordAttachments: function (index) {
     return index === state.recordAt && state.record ? state.record.slice() : null;
   },
-  lastMessageIndex: function () { return state.lastIndex; }
+  recordNamesUnreliable: function () { return state.unreliable; },
+  lastMessageIndex: function () { return state.lastIndex; },
+  // Written by the unit for the BardErrorInfo report; declared so the
+  // assignment lands in this scope rather than on the global object.
+  sendTarget: null
 });
 
 function token(name) {
@@ -98,7 +107,14 @@ function reset(record, opts) {
   state.recordAt = 0;
   state.lastIndex = (opts && opts.lastIndex !== undefined) ? opts.lastIndex : 0;
   state.stale = (opts && opts.stale) || [];
+  state.unreliable = !!(opts && opts.unreliable);
   state.refusals = [];
+}
+
+// The record's issuance of the same file: what §refresh read back from hNvQHb,
+// which never equals the value the page built the request with.
+function recordToken(name) {
+  return [[null, 1, 1, 'image/jpeg'], name, '$RECORD-' + name];
 }
 
 let failures = 0;
@@ -205,6 +221,31 @@ it('refuses the send when the record holds uploads it cannot vouch for', functio
   assert.strictEqual(state.refusals.length, 1, 'the send is refused');
   assert.ok(/reopen the message and resend it/.test(state.refusals[0]),
     'the refusal says what will clear it: ' + state.refusals[0]);
+});
+
+it('leaves the page\'s own references when its list carries the record\'s files', function () {
+  reset([recordToken('a.png'), recordToken('b.png')]);
+  const inner = send(5, ['a.png', 'b.png']);
+  const page = inner[0][3];
+  assert.strictEqual(api.nativeRetryContribution(inner), null, 'nothing is written');
+  assert.strictEqual(inner[0][3], page);
+  assert.deepStrictEqual(inner[0][3].map((a) => a[2]), ['$AXzLiRa.png', '$AXzLiRb.png']);
+  assert.deepStrictEqual(state.refusals, []);
+});
+
+it('sends the page\'s references even where the record\'s uploads have expired', function () {
+  reset([contrib('a.png')], { stale: ['a.png'] });
+  const inner = send(5, ['a.png']);
+  assert.strictEqual(api.nativeRetryContribution(inner), null);
+  assert.deepStrictEqual(state.refusals, [],
+    'the page holds a reference the server takes for the very file the record names');
+});
+
+it('writes the record when matching names prove nothing in this document', function () {
+  reset([recordToken('image.png')], { unreliable: true });
+  const inner = send(5, ['image.png']);
+  assert.strictEqual(api.nativeRetryContribution(inner), false);
+  assert.deepStrictEqual(inner[0][3], [recordToken('image.png')]);
 });
 
 it('leaves a regenerate that carries no attachments alone', function () {

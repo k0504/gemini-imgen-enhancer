@@ -55,7 +55,7 @@ function extract(name) {
 
 const state = { refusals: [], work: {} };
 const names = ['guardSendShape', 'isEditResend', 'applyPlanTo', 'settleExisting',
-  'attReusable', 'planIsReady'];
+  'attReusable', 'planIsReady', 'whyPageListDiffers'];
 const body = names.map(extract).join('\n') + '\n; return { ' + names.join(', ') + ' };';
 const api = new Function('PROMPT_TUPLE', 'ATTACHMENTS', 'ACTION_INDEX', 'ACTION_EDIT_RESEND',
   'CONVERSATION_INDEX', 'RESUME_INDEX', 'work', 'attClass', 'dbg', 'attShape', 'refuseSend',
@@ -176,7 +176,8 @@ it('a record of server references is sent as it stands, nothing uploaded', funct
   assert.ok(p.entries.every((e) => e.sendAsIs), 'both entries hold a reference the server honours');
   assert.strictEqual(api.planIsReady(p), true, 'and the plan is ready the moment it is made');
   const inner = editResend([token('a.jpg'), token('b.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'page',
+    'the page\'s list carries the record\'s files, so it goes out as the page built it');
   assert.deepStrictEqual(inner[0][3], [token('a.jpg'), token('b.jpg')]);
   assert.strictEqual(inner[0][3][0].length, 3, 'a server reference keeps its three elements');
 });
@@ -184,8 +185,10 @@ it('a record of server references is sent as it stands, nothing uploaded', funct
 it('a live contrib of this document is sent as it stands too', function () {
   const p = planFor([contrib('a.jpg')]);
   assert.strictEqual(p.entries[0].sendAsIs, true);
-  const inner = editResend([token('a.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  // A page list naming another file: the record's own tuple is what is
+  // written. Under the same name the page's reference would go out instead.
+  const inner = editResend([token('old.jpg')]);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'written');
   assert.deepStrictEqual(inner[0][3], [contrib('a.jpg')], 'two elements, as uploadFile mints them');
 });
 
@@ -197,7 +200,7 @@ it('only a contrib the server no longer honours waits on a re-upload', function 
   p.entries[1].freshAttachment = contrib('b.jpg');
   assert.strictEqual(api.planIsReady(p), true);
   const inner = editResend([token('a.jpg'), token('b.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'written');
   assert.deepStrictEqual(inner[0][3], [token('a.jpg'), contrib('b.jpg')],
     'the honoured reference is kept, the dead one is replaced by the fresh upload');
 });
@@ -211,15 +214,15 @@ it('a message never resent goes out with the list the page built, read at the se
   const nine = token('a.jpg').concat([null, null, null, null, null, [0]]);
   assert.strictEqual(nine.length, 9);
   const inner = editResend([nine, token('b.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'page');
   assert.deepStrictEqual(inner[0][3], [nine, token('b.jpg')], 'verbatim, tail included');
 });
 
-it('a reordered edit writes the record\'s references in the new order', function () {
+it('a reordered edit writes the references in the new order', function () {
   const p = planFor([token('a.jpg'), token('b.jpg')]);
   p.entries.reverse();
   const inner = editResend([token('a.jpg'), token('b.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'written');
   assert.deepStrictEqual(inner[0][3], [token('b.jpg'), token('a.jpg')]);
 });
 
@@ -227,14 +230,14 @@ it('a new image goes out as the contrib its upload minted', function () {
   const p = planFor([token('a.jpg')]);
   p.entries.push({ kind: 'new', name: 'c.jpg', attachment: contrib('c.jpg') });
   const inner = editResend([token('a.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), true);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'written');
   assert.deepStrictEqual(inner[0][3], [token('a.jpg'), contrib('c.jpg')]);
 });
 
 it('an entry with nothing to be written from refuses the send', function () {
   const p = planFor([stale('a.jpg')]);
   const inner = editResend([token('a.jpg')]);
-  assert.strictEqual(api.applyPlanTo(inner, p), false);
+  assert.strictEqual(api.applyPlanTo(inner, p), 'refused');
   assert.strictEqual(state.refusals.length, 1);
   assert.ok(/1 of the attachments/.test(state.refusals[0]), state.refusals[0]);
 });

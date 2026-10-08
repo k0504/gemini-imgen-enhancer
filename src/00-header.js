@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.68.0
+// @version      3.68.1
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -36,7 +36,9 @@
 //   §protocol   request field indices, attachment shapes, endpoints
 //   §config     tunables and version
 //   §trace      dbg behind a flag, info always on, attShape
-//   §bodies     every outgoing send kept for field-level comparison
+//   §bodies     every outgoing send kept for field-level comparison, and the
+//               page-built and sent bodies of any send refused with
+//               BardErrorInfo
 //   §page       WIZ_global_data recovery and small DOM helpers
 //   §rpc        one call into batchexecute, and the envelope both kinds
 //               of rpc answer in
@@ -50,7 +52,8 @@
 //   §upload     the three-step upload, and what counts as a contrib
 //   §plan       the edit in progress
 //   §freshen    turning every attachment into a contrib of this document
-//   §apply      writing the plan into the outgoing prompt tuple
+//   §apply      writing the plan into the outgoing prompt tuple, or leaving
+//               the page's own list when it already carries the plan
 //   §shape      choosing the shape the resend goes out in
 //   §resend     feature two, assembled: the editor's contribution to a send
 //   §commit     what every rewritten send owes the record, in one place

@@ -22,6 +22,9 @@
     });
     var base = recordAttachments(index);
     var baseBlobs = recordBlobs(index);
+    // Whether a page list carrying the record's file names proves anything
+    // about which images it holds. See whyPageListDiffers.
+    var baseUnreliable = recordNamesUnreliable(index);
     // Asked as edit mode opens, so a message that cannot be resent says so
     // while the user is still deciding rather than on the press. See §durable
     // for what puts a record in this state; none of it is repairable from here.
@@ -51,6 +54,7 @@
       path: appPath(),
       base: base,
       baseBlobs: baseBlobs,
+      baseUnreliable: baseUnreliable,
       blocked: blocked,
       // Declared by §retry before it opened edit mode. A retry changes no
       // image; what the flag does for the plan is make planIsDirty report it
@@ -427,10 +431,74 @@
     return action === ACTION_RETRY || action === ACTION_RETRY_PRO;
   }
 
-  // Writes the plan into the outgoing prompt tuple. null means only that this
-  // send is not the one the plan was made for; true that the attachment list
-  // was written, false that it was backed out of - a send that is still an edit
-  // resend, and still owes the record everything §commit gives one.
+  // Whether the list the page built is the record's list in the page's own
+  // references. null when it is; otherwise why not, for the trace.
+  //
+  // The record says which attachments a message holds; the page's list says
+  // the same thing in the references the page itself was handed. Those are not
+  // the same strings even for the same files: hNvQHb issues a new token on
+  // every answer, so a record §refresh upgraded holds values the page never
+  // sent. Edit resends that carried the record's values over a page list naming
+  // the same files were answered with BardErrorInfo 1155, and the same edit sent
+  // by the page was not. So where the page's list carries the record's files,
+  // it is the page's references that go out.
+  //
+  // A file name is the identity available here, as in §refresh: a form A tuple
+  // carries no thumbnail. It is not enough on its own within the document that
+  // resent the message: the page keeps the list from before that resend, and a
+  // resend that put a different image under a name already in the list leaves
+  // the page's stale list and the record naming the same files. commitSend
+  // marks a record in that state (namesShadowPage), and such a record is never
+  // read off the page until a reload has put the server's list on it.
+  function whyPageListDiffers(page, record, unreliable) {
+    if (!Array.isArray(page)) return 'the page built no attachment list';
+    if (unreliable) {
+      return 'this document resent the message with other images under the same file names';
+    }
+    if (page.length !== record.length) {
+      return 'the page lists ' + page.length + ' attachments, the record ' + record.length;
+    }
+    for (var i = 0; i < record.length; i++) {
+      var mine = Array.isArray(page[i]) ? page[i][1] : undefined;
+      var theirs = Array.isArray(record[i]) ? record[i][1] : undefined;
+      if (typeof mine !== 'string' || mine !== theirs) {
+        return 'attachment ' + i + ' is ' + JSON.stringify(mine) + ' on the page and '
+          + JSON.stringify(theirs) + ' in the record';
+      }
+      // A reference the server would not take is not one the page can be
+      // trusted to express the record with; the record's own is written.
+      if (!attReusable(page[i])) {
+        return 'attachment ' + i + ' on the page is ' + attClass(page[i]);
+      }
+    }
+    return null;
+  }
+
+  // Whether the list this send writes leaves the page's stale list naming the
+  // same files while holding other images, which is the state in which
+  // whyPageListDiffers must not read the page until a reload. Once set it holds
+  // for every later write in this document: the page's list does not move.
+  function namesShadowPage(p, page, written) {
+    if (p.baseUnreliable) return true;
+    if (!Array.isArray(page) || page.length !== written.length) return false;
+    for (var i = 0; i < written.length; i++) {
+      if (!Array.isArray(page[i]) || page[i][1] !== written[i][1]) return false;
+    }
+    // Same names in the same places. Only an entry that is not the image the
+    // page held at that place - a new upload, or one moved there - makes those
+    // names say something false. A re-upload in place is the same image.
+    return p.entries.some(function (entry, at) {
+      return entry.kind !== 'existing' || entry.index !== at;
+    });
+  }
+
+  // Writes the plan into the outgoing prompt tuple. Answers one of:
+  //   null       this send is not the one the plan was made for
+  //   'page'     the page's own list already carries the plan, and goes out
+  //              untouched
+  //   'written'  the plan's list was written over the page's
+  //   'refused'  there is no correct list to write; the send is refused, and
+  //              §resend reads that
   //
   // The sentinel is not this function's to strip. rewrite() takes it off every
   // send that carries it, plan or no plan, which is the only rule that also
@@ -443,22 +511,28 @@
     }
 
     var tuple = inner[PROMPT_TUPLE];
-    var listWritten = false;
+    var page = tuple[ATTACHMENTS];
 
-    // The body's own list is what this message holds only while it has never
-    // been resent; after that the record is, and the body carries the stale one.
-    var base = p.base || tuple[ATTACHMENTS];
-    dbg('applyPlanTo: body carries', attShape(tuple[ATTACHMENTS]));
-    dbg('applyPlanTo: base =', p.base ? 'record' : 'body', '(' + attShape(base) + ')');
+    // Which list an existing entry's reference is read from. With no record the
+    // page's list is the only one there is. With one, the page's list is still
+    // read when it carries the record's files, so the references the page was
+    // handed are the ones that go out; the record's are written only for a page
+    // list that names something else, which is the list from before this
+    // message was last resent.
+    var differs = p.base ? whyPageListDiffers(page, p.base, p.baseUnreliable) : null;
+    var base = differs ? p.base : page;
+    dbg('applyPlanTo: body carries', attShape(page));
+    dbg('applyPlanTo: base =', !p.base ? 'body (no record)'
+      : differs ? 'record, because ' + differs : 'body (it carries the record\'s files)',
+      '(' + attShape(base) + ')');
     dbg('applyPlanTo: plan wants', p.entries.map(function (e) {
       return e.kind === 'existing' ? 'existing#' + e.index : 'new:' + e.name;
     }).join(', '));
 
     // What each entry goes out as, verbatim. An existing entry sent as it
-    // stands is the base's own tuple - the record's, or the page's for a
-    // message never resent - tail and all: this is the page's own edit resend,
-    // so the page's own form is right. One that was re-uploaded is the contrib
-    // its upload minted, and a new entry likewise. Nothing is reshaped.
+    // stands is the base's own tuple, tail and all: this is the page's own edit
+    // resend, so the page's own form is right. One that was re-uploaded is the
+    // contrib its upload minted, and a new entry likewise. Nothing is reshaped.
     var refs = p.entries.map(function (entry) {
       if (entry.kind !== 'existing') return entry.attachment || null;
       if (!entry.sendAsIs) return entry.freshAttachment || null;
@@ -481,17 +555,27 @@
     if (missing) {
       refuseSend(missing + ' of the attachments for message #' + p.index
         + ' have nothing to be written from');
-    } else if (count !== p.originalCount) {
+      return 'refused';
+    }
+    if (count !== p.originalCount) {
       refuseSend('the record for message #' + p.index + ' holds ' + count
         + ' attachments against the ' + p.originalCount + ' the editor opened with, '
         + 'so which list to write cannot be established');
-    } else {
-      tuple[ATTACHMENTS] = refs;
-      listWritten = true;
-      dbg('applyPlanTo: wrote', attShape(tuple[ATTACHMENTS]));
+      return 'refused';
     }
 
-    return listWritten;
+    // Every reference is the page's own, in the page's own places: the plan
+    // asks for exactly the list the page built, so nothing is written and the
+    // request carries it as the page made it.
+    var pageStands = Array.isArray(page) && refs.length === page.length
+      && refs.every(function (ref, at) { return ref === page[at]; });
+    if (pageStands) {
+      dbg('applyPlanTo: the page\'s own list carries the plan, nothing written');
+      return 'page';
+    }
+    tuple[ATTACHMENTS] = refs;
+    dbg('applyPlanTo: wrote', attShape(tuple[ATTACHMENTS]));
+    return 'written';
   }
 
   // §shape ===================================================================
