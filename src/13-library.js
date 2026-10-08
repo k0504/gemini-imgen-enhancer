@@ -341,10 +341,35 @@
         if (typeof url !== 'string' || url.indexOf('googleusercontent') === -1) {
           throw new Error('the download rpc named no image');
         }
-        // The key out of it. The chain is seeded with the key, not with the
-        // url the answer spells it into.
-        return lhKey(url);
+        return originalOf(url);
       });
+  }
+
+  // Where the original is fetched from: the address the download rpc answered,
+  // at full size. The answer comes in two forms since the October 2026 update -
+  // `gg/<key>` for a token minted moments ago, `gg-dl/<key>` (after about ten
+  // seconds) for one the server has to look up again - and both serve the
+  // original at `=s0`, measured 2304x1856 and 1696x2528 on gg-dl answers, one
+  // of them for a token held thirty days. Taking the key out and re-seeding it
+  // under `gg/` is what turned every gg-dl answer into an http 400 that read
+  // as a dead token. Any other form is not one this code knows, and is refused.
+  var ORIGINAL_PREFIXES = [
+    'https://lh3.googleusercontent.com/gg/',
+    'https://lh3.googleusercontent.com/gg-dl/'
+  ];
+
+  function originalOf(url) {
+    for (var i = 0; i < ORIGINAL_PREFIXES.length; i++) {
+      var prefix = ORIGINAL_PREFIXES[i];
+      if (url.indexOf(prefix) !== 0) continue;
+      var key = url.slice(prefix.length);
+      var cut = key.search(/[=?#]/);
+      if (cut !== -1) key = key.slice(0, cut);
+      if (!key) break;
+      return prefix + key + '=s0';
+    }
+    throw new Error('the download rpc answered an address of a form not known here: '
+      + url.slice(0, 60) + ' - originalOf() in src/13-library.js needs the new form');
   }
 
   // §library:resolve ---------------------------------------------------------
@@ -449,33 +474,16 @@
     });
   }
 
-  // The download is a chain, not a request: `gg/<seed>=d-I` answers a
-  // text/plain body holding the next URL, that one answers another, and only
-  // the last answers the file. Each hop is followed until the body stops
-  // being text.
-  //
-  // Pointers are followed to the host they name. The middle hop names
-  // lh3.google.com, and rewriting it onto googleusercontent.com - which the
-  // header's @connect used to be the only reason for - answers with a further
-  // pointer rather than the file, on and on past any hop limit. The header
-  // grants lh3.google.com instead, and the chain is walked as served.
-  // Where the chain starts. The key is the seed and `=d-I` is what asks for the
-  // file rather than a rendering of it.
-  function seedUrl(key) {
-    return 'https://lh3.googleusercontent.com/gg/' + key + '=d-I?alr=yes';
-  }
-
-  function followChain(url, hops) {
+  // One request at the address originalOf() gave. What comes back has to be
+  // an image; anything else is refused with its type, not saved.
+  function fetchOriginal(url) {
     return gmGet(url, 'blob').then(function (blob) {
-      if (!blob || blob.type.indexOf('text/') !== 0) return blob;
-      if (hops <= 0) throw new Error('the pointer chain did not end');
-      return blob.text().then(function (text) {
-        var next = text.trim();
-        if (next.indexOf('https://') !== 0) {
-          throw new Error('unexpected answer inside the pointer chain');
-        }
-        return followChain(next, hops - 1);
-      });
+      var type = blob && blob.type;
+      if (!type || type.indexOf('image/') !== 0) {
+        throw new Error('the original address answered ' + (type || 'nothing')
+          + ', not an image: ' + url.slice(0, 60));
+      }
+      return blob;
     });
   }
 
@@ -800,11 +808,9 @@
     // rows had gone stale: the first token was refused outright, the second was
     // answered with a key the chain would not serve.
     function byToken(row) {
-      return originalByToken(row, row.conv || conv).then(function (key) {
-        noteDownload('the rpc answered, walking the download chain');
-        // The chain the lightbox walks, seeded the way the lightbox seeds it.
-        // Each hop's body is the next url and is used as it stands.
-        return followChain(seedUrl(key), 4);
+      return originalByToken(row, row.conv || conv).then(function (url) {
+        noteDownload('the rpc answered, fetching the original');
+        return fetchOriginal(url);
       });
     }
 

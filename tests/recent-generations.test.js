@@ -4,9 +4,9 @@
 //
 // The ledger drops a turn's rows as soon as the library listing stops naming
 // it, which is the very moment a lost image is noticed. This buffer is what
-// answers after that: a small ring in localStorage holding the `gg/<key>` the
-// download rpc gave for each of the last few generations. Recovery walks the
-// download chain from that key and asks the server nothing else - which is
+// answers after that: a small ring in localStorage holding the original's
+// address the download rpc gave for each of the last few generations.
+// Recovery fetches that address and asks the server nothing else - which is
 // also the experiment: a key that still serves says the file outlived its
 // links, a 404 says it did not.
 //
@@ -43,7 +43,7 @@ function harness(stubs) {
   const log = { said: [], info: [], dbg: [], saved: [], chains: [], rpc: [], menus: 0 };
   const api = new Function(
     'RECENT_STORE', 'RECENT_KEEP', 'localStorage', 'tokenEntries', 'conversationIn',
-    'originalByToken', 'followChain', 'seedUrl', 'saveBlob', 'saveName', 'say', 'info', 'dbg',
+    'originalByToken', 'fetchOriginal', 'saveBlob', 'saveName', 'say', 'info', 'dbg',
     'progress', 'renderMenu', 'LOG_IMG', 'Date',
     body)(
     'gpieRecent', 3,
@@ -55,8 +55,7 @@ function harness(stubs) {
     stubs.tokenEntries || (() => []),
     stubs.conversationIn || (() => null),
     stubs.originalByToken || (() => Promise.reject(new Error('no rpc in this test'))),
-    stubs.followChain || ((url) => { log.chains.push(url); return Promise.resolve({ type: 'image/jpeg' }); }),
-    (key) => 'seed:' + key,
+    stubs.fetchOriginal || ((url) => { log.chains.push(url); return Promise.resolve({ type: 'image/jpeg' }); }),
     (blob, name) => { log.saved.push(name); },
     (id, type) => 'gemini-' + id.slice(-12).replace(/[^A-Za-z0-9]/g, '') + '.' + (/jpeg/.test(type) ? 'jpg' : 'img'),
     (level, tag, ...rest) => { log.said.push([level, rest.join(' ')]); },
@@ -74,21 +73,21 @@ function harness(stubs) {
 
 {
   const { api } = harness({});
-  const e = (key, resp) => ({ key, resp, slot: 0, conv: 'c', at: 1 });
+  const e = (url, resp) => ({ url, resp, slot: 0, conv: 'c', at: 1 });
   let list = [];
-  list = api.recentPush(list, e('K1', 'r_1'), 3);
-  list = api.recentPush(list, e('K2', 'r_2'), 3);
-  list = api.recentPush(list, e('K3', 'r_3'), 3);
-  assert.deepStrictEqual(list.map((x) => x.key), ['K3', 'K2', 'K1'], 'newest first');
-  list = api.recentPush(list, e('K4', 'r_4'), 3);
-  assert.deepStrictEqual(list.map((x) => x.key), ['K4', 'K3', 'K2'], 'the oldest falls off at the cap');
-  list = api.recentPush(list, e('K3', 'r_3'), 3);
-  assert.deepStrictEqual(list.map((x) => x.key), ['K3', 'K4', 'K2'],
-    'a key already held moves to the front rather than appearing twice');
-  const same = api.recentPush(list, { key: 'K9', resp: 'r_4', slot: 0, conv: 'c', at: 2 }, 3);
-  assert.deepStrictEqual(same.map((x) => x.key), ['K9', 'K3', 'K2'],
-    'a new key for the same turn and slot replaces the old one');
-  console.log('ok  recentPush keeps the newest few, one per key and per image');
+  list = api.recentPush(list, e('U1', 'r_1'), 3);
+  list = api.recentPush(list, e('U2', 'r_2'), 3);
+  list = api.recentPush(list, e('U3', 'r_3'), 3);
+  assert.deepStrictEqual(list.map((x) => x.url), ['U3', 'U2', 'U1'], 'newest first');
+  list = api.recentPush(list, e('U4', 'r_4'), 3);
+  assert.deepStrictEqual(list.map((x) => x.url), ['U4', 'U3', 'U2'], 'the oldest falls off at the cap');
+  list = api.recentPush(list, e('U3', 'r_3'), 3);
+  assert.deepStrictEqual(list.map((x) => x.url), ['U3', 'U4', 'U2'],
+    'an address already held moves to the front rather than appearing twice');
+  const same = api.recentPush(list, { url: 'U9', resp: 'r_4', slot: 0, conv: 'c', at: 2 }, 3);
+  assert.deepStrictEqual(same.map((x) => x.url), ['U9', 'U3', 'U2'],
+    'a new address for the same turn and slot replaces the old one');
+  console.log('ok  recentPush keeps the newest few, one per address and per image');
 }
 
 // --- reading the generation answer ------------------------------------------
@@ -139,7 +138,7 @@ function harness(stubs) {
     'the largest token is asked first and answers, so the other is never asked');
   const kept = JSON.parse(store.gpieRecent);
   assert.strictEqual(kept.length, 1);
-  assert.strictEqual(kept[0].key, 'KEY_ORIG');
+  assert.strictEqual(kept[0].url, 'KEY_ORIG');
   assert.strictEqual(kept[0].resp, 'r_11');
   assert.strictEqual(kept[0].conv, 'conv1');
   assert.strictEqual(kept[0].at, 1000);
@@ -161,7 +160,7 @@ function harness(stubs) {
   });
   await h2.api.rememberRecent([{}]);
   assert.deepStrictEqual(asked2, ['$a', '$b']);
-  assert.strictEqual(JSON.parse(h2.store.gpieRecent)[0].key, 'KEY_B');
+  assert.strictEqual(JSON.parse(h2.store.gpieRecent)[0].url, 'KEY_B');
 
   // Every token refused: nothing is written and the failure is said, not swallowed.
   const h3 = harness({
@@ -184,28 +183,39 @@ function harness(stubs) {
 
   const h5 = harness({});
   h5.api.writeRecent([
-    { key: 'KEY_NEW', resp: 'r_new', slot: 0, conv: 'c', at: 2 },
-    { key: 'KEY_OLD', resp: 'r_old', slot: 1, conv: 'c', at: 1 }
+    { url: 'URL_NEW', resp: 'r_new', slot: 0, conv: 'c', at: 2 },
+    { url: 'URL_OLD', resp: 'r_old', slot: 1, conv: 'c', at: 1 }
   ]);
   await h5.api.recoverRecent();
-  assert.deepStrictEqual(h5.log.chains, ['seed:KEY_NEW', 'seed:KEY_OLD'],
-    'each held key is walked from its seed, newest first, and nothing is asked of the rpc');
+  assert.deepStrictEqual(h5.log.chains, ['URL_NEW', 'URL_OLD'],
+    'each held address is fetched as kept, newest first, and nothing is asked of the rpc');
   assert.deepStrictEqual(h5.log.saved, ['gemini-rnew0.jpg', 'gemini-rold1.jpg']);
 
-  // A key the chain refuses is reported with its status and the rest still run.
+  // An address that is refused is reported with its status and the rest still run.
   const h6 = harness({
-    followChain: (url) => (url === 'seed:GONE'
+    fetchOriginal: (url) => (url === 'GONE'
       ? Promise.reject(new Error('http 404'))
       : Promise.resolve({ type: 'image/jpeg' }))
   });
   h6.api.writeRecent([
-    { key: 'GONE', resp: 'r_gone', slot: 0, conv: 'c', at: 2 },
-    { key: 'HERE', resp: 'r_here', slot: 0, conv: 'c', at: 1 }
+    { url: 'GONE', resp: 'r_gone', slot: 0, conv: 'c', at: 2 },
+    { url: 'HERE', resp: 'r_here', slot: 0, conv: 'c', at: 1 }
   ]);
   await h6.api.recoverRecent();
   assert.deepStrictEqual(h6.log.saved, ['gemini-rhere0.jpg']);
   assert.ok(h6.log.said.some((s) => s[0] === 'error' && /r_gone/.test(s[1]) && /http 404/.test(s[1])),
-    'the refused key is named with the status the chain answered');
+    'the refused address is named with the status it answered');
+
+  // An entry kept before 3.68.2 holds a bare key: said, never fetched, the rest run.
+  const h9 = harness({});
+  h9.api.writeRecent([
+    { key: 'BARE', resp: 'r_bare', slot: 0, conv: 'c', at: 2 },
+    { url: 'URL_OK', resp: 'r_ok', slot: 0, conv: 'c', at: 1 }
+  ]);
+  await h9.api.recoverRecent();
+  assert.deepStrictEqual(h9.log.chains, ['URL_OK'], 'the bare-key entry is not fetched');
+  assert.ok(h9.log.said.some((s) => s[0] === 'error' && /r_bare/.test(s[1]) && /3\.68\.2/.test(s[1])),
+    'the bare-key entry is named as kept before 3.68.2');
 
   // Nothing on record is said, not silently nothing.
   const h7 = harness({});

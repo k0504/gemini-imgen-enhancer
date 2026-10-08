@@ -5,8 +5,8 @@
   // The ledger is pruned against the library listing: a turn the listing stops
   // naming has its rows dropped on the next read, which is the very moment a
   // lost image is noticed. What is kept here is not the media token but the
-  // `gg/<key>` the download rpc answered with, so recovery walks the download
-  // chain from it and asks the server nothing else. That is also the
+  // original's address the download rpc answered with (originalOf), so
+  // recovery fetches it and asks the server nothing else. That is also the
   // experiment this exists to run: a key that still serves after the turn was
   // taken off the conversation and the library says the file outlived its
   // links; a 404 says it did not, and only bytes kept here would have done.
@@ -36,12 +36,12 @@
     }
   }
 
-  // Newest first, capped. A key already held moves to the front, and a new key
-  // for an image already held - the same turn and slot - replaces it, so a
-  // repeated landing of one generation cannot fill the ring with itself.
+  // Newest first, capped. An address already held moves to the front, and a new
+  // address for an image already held - the same turn and slot - replaces it,
+  // so a repeated landing of one generation cannot fill the ring with itself.
   function recentPush(list, entry, keep) {
     var out = list.filter(function (held) {
-      if (held.key === entry.key) return false;
+      if (held.url === entry.url) return false;
       return !(held.resp === entry.resp && held.slot === entry.slot);
     });
     out.unshift(entry);
@@ -106,9 +106,9 @@
     if (!turns.length) return Promise.resolve();
     return turns.reduce(function (chain, turn) {
       return chain.then(function () {
-        return resolveRecent(turn, 0).then(function (key) {
+        return resolveRecent(turn, 0).then(function (url) {
           var list = recentPush(readRecent(), {
-            key: key,
+            url: url,
             resp: turn.resp,
             slot: turn.slot,
             conv: turn.conv,
@@ -126,9 +126,10 @@
     }, Promise.resolve());
   }
 
-  // From the menu. Every held key is walked from its seed and saved, newest
-  // first; one that no longer serves is reported with the status the chain
-  // answered and the rest still run.
+  // From the menu. Every held address is fetched and saved, newest first; one
+  // that no longer serves is reported with the status it answered and the rest
+  // still run. An entry kept before 3.68.2 holds a bare key and no address; it
+  // is reported as such rather than rebuilt into an address.
   function recoverRecent() {
     var list = readRecent();
     if (!list.length) {
@@ -140,9 +141,14 @@
     return list.reduce(function (chain, entry, i) {
       return chain.then(function () {
         var id = entry.resp + '#' + entry.slot;
-        progress('recover: ' + (i + 1) + ' of ' + list.length + ', walking the chain for '
-          + id.slice(-8));
-        return followChain(seedUrl(entry.key), 4).then(function (blob) {
+        progress('recover: ' + (i + 1) + ' of ' + list.length + ', fetching ' + id.slice(-8));
+        if (typeof entry.url !== 'string') {
+          say('error', LOG_IMG, 'recent: the entry of ' + id + ' was kept before 3.68.2 and holds'
+            + ' no address - it cannot be recovered; new generations are kept with one');
+          progress('recover: ' + id.slice(-8) + ' has no address', i + 1 === list.length);
+          return;
+        }
+        return fetchOriginal(entry.url).then(function (blob) {
           saveBlob(blob, saveName(id, blob.type));
           saved++;
           progress('recover: ' + id.slice(-8) + ' saved', i + 1 === list.length);

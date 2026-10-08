@@ -8,7 +8,7 @@
 // @supportURL   https://github.com/k0504/gemini-imgen-enhancer/issues
 // @updateURL    https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/k0504/gemini-imgen-enhancer/main/gemini-imgen-enhancer.user.js
-// @version      3.68.1
+// @version      3.68.2
 // @description  Force Gemini image generation onto Nano Banana Pro from the first request, and edit the images attached to an existing prompt.
 // @description:zh-TW  自首次請求即強制以 Nano Banana Pro 生成圖片，並可編輯既有 prompt 附加的圖片。
 // @match        https://gemini.google.com/*
@@ -153,7 +153,7 @@
   };
 
   // §config ==================================================================
-  var VERSION = '3.68.1';
+  var VERSION = '3.68.2';
 
   // Gemini keeps its own Update button disabled until the prompt text differs
   // from what the message already holds, so an image-only change cannot be
@@ -5864,10 +5864,35 @@
         if (typeof url !== 'string' || url.indexOf('googleusercontent') === -1) {
           throw new Error('the download rpc named no image');
         }
-        // The key out of it. The chain is seeded with the key, not with the
-        // url the answer spells it into.
-        return lhKey(url);
+        return originalOf(url);
       });
+  }
+
+  // Where the original is fetched from: the address the download rpc answered,
+  // at full size. The answer comes in two forms since the October 2026 update -
+  // `gg/<key>` for a token minted moments ago, `gg-dl/<key>` (after about ten
+  // seconds) for one the server has to look up again - and both serve the
+  // original at `=s0`, measured 2304x1856 and 1696x2528 on gg-dl answers, one
+  // of them for a token held thirty days. Taking the key out and re-seeding it
+  // under `gg/` is what turned every gg-dl answer into an http 400 that read
+  // as a dead token. Any other form is not one this code knows, and is refused.
+  var ORIGINAL_PREFIXES = [
+    'https://lh3.googleusercontent.com/gg/',
+    'https://lh3.googleusercontent.com/gg-dl/'
+  ];
+
+  function originalOf(url) {
+    for (var i = 0; i < ORIGINAL_PREFIXES.length; i++) {
+      var prefix = ORIGINAL_PREFIXES[i];
+      if (url.indexOf(prefix) !== 0) continue;
+      var key = url.slice(prefix.length);
+      var cut = key.search(/[=?#]/);
+      if (cut !== -1) key = key.slice(0, cut);
+      if (!key) break;
+      return prefix + key + '=s0';
+    }
+    throw new Error('the download rpc answered an address of a form not known here: '
+      + url.slice(0, 60) + ' - originalOf() in src/13-library.js needs the new form');
   }
 
   // §library:resolve ---------------------------------------------------------
@@ -5972,33 +5997,16 @@
     });
   }
 
-  // The download is a chain, not a request: `gg/<seed>=d-I` answers a
-  // text/plain body holding the next URL, that one answers another, and only
-  // the last answers the file. Each hop is followed until the body stops
-  // being text.
-  //
-  // Pointers are followed to the host they name. The middle hop names
-  // lh3.google.com, and rewriting it onto googleusercontent.com - which the
-  // header's @connect used to be the only reason for - answers with a further
-  // pointer rather than the file, on and on past any hop limit. The header
-  // grants lh3.google.com instead, and the chain is walked as served.
-  // Where the chain starts. The key is the seed and `=d-I` is what asks for the
-  // file rather than a rendering of it.
-  function seedUrl(key) {
-    return 'https://lh3.googleusercontent.com/gg/' + key + '=d-I?alr=yes';
-  }
-
-  function followChain(url, hops) {
+  // One request at the address originalOf() gave. What comes back has to be
+  // an image; anything else is refused with its type, not saved.
+  function fetchOriginal(url) {
     return gmGet(url, 'blob').then(function (blob) {
-      if (!blob || blob.type.indexOf('text/') !== 0) return blob;
-      if (hops <= 0) throw new Error('the pointer chain did not end');
-      return blob.text().then(function (text) {
-        var next = text.trim();
-        if (next.indexOf('https://') !== 0) {
-          throw new Error('unexpected answer inside the pointer chain');
-        }
-        return followChain(next, hops - 1);
-      });
+      var type = blob && blob.type;
+      if (!type || type.indexOf('image/') !== 0) {
+        throw new Error('the original address answered ' + (type || 'nothing')
+          + ', not an image: ' + url.slice(0, 60));
+      }
+      return blob;
     });
   }
 
@@ -6323,11 +6331,9 @@
     // rows had gone stale: the first token was refused outright, the second was
     // answered with a key the chain would not serve.
     function byToken(row) {
-      return originalByToken(row, row.conv || conv).then(function (key) {
-        noteDownload('the rpc answered, walking the download chain');
-        // The chain the lightbox walks, seeded the way the lightbox seeds it.
-        // Each hop's body is the next url and is used as it stands.
-        return followChain(seedUrl(key), 4);
+      return originalByToken(row, row.conv || conv).then(function (url) {
+        noteDownload('the rpc answered, fetching the original');
+        return fetchOriginal(url);
       });
     }
 
@@ -7508,8 +7514,8 @@
   // The ledger is pruned against the library listing: a turn the listing stops
   // naming has its rows dropped on the next read, which is the very moment a
   // lost image is noticed. What is kept here is not the media token but the
-  // `gg/<key>` the download rpc answered with, so recovery walks the download
-  // chain from it and asks the server nothing else. That is also the
+  // original's address the download rpc answered with (originalOf), so
+  // recovery fetches it and asks the server nothing else. That is also the
   // experiment this exists to run: a key that still serves after the turn was
   // taken off the conversation and the library says the file outlived its
   // links; a 404 says it did not, and only bytes kept here would have done.
@@ -7539,12 +7545,12 @@
     }
   }
 
-  // Newest first, capped. A key already held moves to the front, and a new key
-  // for an image already held - the same turn and slot - replaces it, so a
-  // repeated landing of one generation cannot fill the ring with itself.
+  // Newest first, capped. An address already held moves to the front, and a new
+  // address for an image already held - the same turn and slot - replaces it,
+  // so a repeated landing of one generation cannot fill the ring with itself.
   function recentPush(list, entry, keep) {
     var out = list.filter(function (held) {
-      if (held.key === entry.key) return false;
+      if (held.url === entry.url) return false;
       return !(held.resp === entry.resp && held.slot === entry.slot);
     });
     out.unshift(entry);
@@ -7609,9 +7615,9 @@
     if (!turns.length) return Promise.resolve();
     return turns.reduce(function (chain, turn) {
       return chain.then(function () {
-        return resolveRecent(turn, 0).then(function (key) {
+        return resolveRecent(turn, 0).then(function (url) {
           var list = recentPush(readRecent(), {
-            key: key,
+            url: url,
             resp: turn.resp,
             slot: turn.slot,
             conv: turn.conv,
@@ -7629,9 +7635,10 @@
     }, Promise.resolve());
   }
 
-  // From the menu. Every held key is walked from its seed and saved, newest
-  // first; one that no longer serves is reported with the status the chain
-  // answered and the rest still run.
+  // From the menu. Every held address is fetched and saved, newest first; one
+  // that no longer serves is reported with the status it answered and the rest
+  // still run. An entry kept before 3.68.2 holds a bare key and no address; it
+  // is reported as such rather than rebuilt into an address.
   function recoverRecent() {
     var list = readRecent();
     if (!list.length) {
@@ -7643,9 +7650,14 @@
     return list.reduce(function (chain, entry, i) {
       return chain.then(function () {
         var id = entry.resp + '#' + entry.slot;
-        progress('recover: ' + (i + 1) + ' of ' + list.length + ', walking the chain for '
-          + id.slice(-8));
-        return followChain(seedUrl(entry.key), 4).then(function (blob) {
+        progress('recover: ' + (i + 1) + ' of ' + list.length + ', fetching ' + id.slice(-8));
+        if (typeof entry.url !== 'string') {
+          say('error', LOG_IMG, 'recent: the entry of ' + id + ' was kept before 3.68.2 and holds'
+            + ' no address - it cannot be recovered; new generations are kept with one');
+          progress('recover: ' + id.slice(-8) + ' has no address', i + 1 === list.length);
+          return;
+        }
+        return fetchOriginal(entry.url).then(function (blob) {
           saveBlob(blob, saveName(id, blob.type));
           saved++;
           progress('recover: ' + id.slice(-8) + ' saved', i + 1 === list.length);
